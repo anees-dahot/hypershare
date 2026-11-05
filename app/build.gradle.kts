@@ -13,11 +13,11 @@ android {
 
     defaultConfig {
         applicationId = "com.hypershare"
-        // API 29: WifiP2pConfig.Builder (network name + passphrase + band) needs Android 10.
-        minSdk = 29
+        // Android 8+. Android 10+ APIs are guarded with legacy fallbacks (see p2p/Legacy.kt, Io.kt).
+        minSdk = 26
         targetSdk = 36
-        versionCode = 301
-        versionName = "0.3.1"
+        versionCode = 400
+        versionName = "0.4.0"
     }
 
     // Release key lives outside the repo (~/.hypershare/keystore.properties).

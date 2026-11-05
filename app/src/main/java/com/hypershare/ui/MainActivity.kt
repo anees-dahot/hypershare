@@ -80,7 +80,8 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= 33) {
                 add(Manifest.permission.NEARBY_WIFI_DEVICES)
                 add(Manifest.permission.POST_NOTIFICATIONS)
-            } else add(Manifest.permission.ACCESS_FINE_LOCATION)
+            } else { add(Manifest.permission.ACCESS_FINE_LOCATION); add(Manifest.permission.ACCESS_COARSE_LOCATION) }
+            if (Build.VERSION.SDK_INT < 29) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }.toTypedArray())
         lifecycleScope.launch { Updater.check() }
         if (BuildConfig.DEBUG) debugHook(intent)

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 8–9: received files live in Download/HyperShare and are shared via FileProvider. -->
+<paths>
+    <external-path name="downloads" path="Download/HyperShare/" />
+</paths>

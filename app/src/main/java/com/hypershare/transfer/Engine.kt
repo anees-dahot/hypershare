@@ -275,7 +275,7 @@ object Engine {
             val sta = staFreq(ctx)
             val (i, g) = p.host(sta)
             inv = i
-            set(s.gen) { it.copy(tip = tipFor(sta, g.frequency)) }
+            set(s.gen) { it.copy(tip = tipFor(sta, com.hypershare.p2p.groupFreq(g))) }
         }
         set(s.gen) {
             it.copy(phase = Phase.Waiting, qr = inv.encode(), freqMhz = inv.freq, link = linkLabel(inv.type, inv.freq))
@@ -370,7 +370,8 @@ object Engine {
         } else {
             val p = s.keep(P2p(ctx))
             p.join(inv)
-            set(s.gen) { it.copy(tip = tipFor(staFreq(ctx), inv.freq)) }
+            val f = if (inv.freq > 0) inv.freq else p.legacyFreq
+            set(s.gen) { it.copy(freqMhz = f, link = linkLabel(inv.type, f), tip = if (p.legacyFreq > 0) null else tipFor(staFreq(ctx), f)) }
         }
 
         val (ctrl, ip) = connectCtrl(inv.ips)

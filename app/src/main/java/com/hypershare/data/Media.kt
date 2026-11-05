@@ -57,7 +57,7 @@ object MediaRepo {
     }
 
     suspend fun media(ctx: Context, kind: MediaKind): List<Entity> = withContext(Dispatchers.IO) {
-        val vol = MediaStore.VOLUME_EXTERNAL
+        val vol = "external" // MediaStore.VOLUME_EXTERNAL, valid on all versions
         val coll = when (kind) {
             MediaKind.Photos -> MediaStore.Images.Media.getContentUri(vol)
             MediaKind.Videos -> MediaStore.Video.Media.getContentUri(vol)

@@ -68,8 +68,11 @@ fun staFreq(ctx: Context): Int =
 
 // ------------------------------------------------------------------ Wi-Fi Direct
 
+/** Group frequency, or 0 where Android (8–9) can't tell us. */
+fun groupFreq(g: WifiP2pGroup) = if (Build.VERSION.SDK_INT >= 29) g.frequency else 0
+
 @SuppressLint("MissingPermission")
-class P2p(ctx: Context) : Closeable {
+class P2p(private val ctx: Context) : Closeable {
     companion object { const val GO_IP = "192.168.49.1" }
 
     private val mgr = ctx.getSystemService(WifiP2pManager::class.java)
@@ -84,6 +87,7 @@ class P2p(ctx: Context) : Closeable {
      */
     suspend fun host(sta: Int): Pair<Invite, WifiP2pGroup> {
         removeGroup()
+        if (Build.VERSION.SDK_INT < 29) return hostLegacy()
         val ssid = "DIRECT-hs-" + rnd(4)
         val pass = rnd(12)
         val tries = buildList {
@@ -99,14 +103,33 @@ class P2p(ctx: Context) : Closeable {
         }
         last?.let { throw it }
         repeat(40) {
-            groupInfo()?.let { g -> return Invite(Invite.DIRECT, ssid, pass, g.frequency, false, listOf(GO_IP)) to g }
+            groupInfo()?.let { g -> return Invite(Invite.DIRECT, ssid, pass, groupFreq(g), false, listOf(GO_IP)) to g }
             delay(250)
         }
         throw IOException("Wi-Fi Direct group did not come up")
     }
 
+    /** Android 8–9: no config builder, so let the chip pick name/passphrase and read them back. */
+    private suspend fun hostLegacy(): Pair<Invite, WifiP2pGroup> {
+        act { mgr.createGroup(ch, it) }
+        repeat(40) {
+            groupInfo()?.takeIf { !it.passphrase.isNullOrEmpty() }?.let { g ->
+                return Invite(Invite.DIRECT, g.networkName, g.passphrase, 0, false, listOf(GO_IP)) to g
+            }
+            delay(250)
+        }
+        throw IOException("Wi-Fi Direct group did not come up")
+    }
+
+    private var legacy: LegacyJoin? = null
+    val legacyFreq get() = legacy?.freq ?: 0
+
     /** Sender side: join the receiver's group by name + passphrase, scanning only its channel. */
     suspend fun join(inv: Invite) {
+        if (Build.VERSION.SDK_INT < 29) {
+            legacy = LegacyJoin(ctx).also { it.join(inv.ssid, inv.pass) }
+            return
+        }
         removeGroup()
         val b = base(inv.ssid, inv.pass)
         val cfg = if (inv.freq > 0) b.setGroupOperatingFrequency(inv.freq).build()
@@ -121,10 +144,12 @@ class P2p(ctx: Context) : Closeable {
 
     /** Tears the group down without waiting (safe from any thread). */
     override fun close() {
+        legacy?.close(); legacy = null
         runCatching { mgr.removeGroup(ch, null) }
-        runCatching { ch.close() }
+        if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
     }
 
+    @androidx.annotation.RequiresApi(29)
     private fun base(ssid: String, pass: String) = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(pass)
 
     private suspend fun act(call: (WifiP2pManager.ActionListener) -> Unit) =
@@ -212,8 +237,18 @@ class HotspotClient(private val ctx: Context) : Closeable {
     private val cm = ctx.getSystemService(ConnectivityManager::class.java)
     private var cb: ConnectivityManager.NetworkCallback? = null
     var freq = 0; private set
+    private var legacy: LegacyJoin? = null
 
     suspend fun join(inv: Invite) {
+        if (Build.VERSION.SDK_INT < 29) {
+            legacy = LegacyJoin(ctx).also { it.join(inv.ssid, inv.pass); freq = it.freq }
+            return
+        }
+        joinModern(inv)
+    }
+
+    @androidx.annotation.RequiresApi(29)
+    private suspend fun joinModern(inv: Invite) {
         val spec = WifiNetworkSpecifier.Builder().setSsid(inv.ssid).apply {
             if (inv.wpa3) setWpa3Passphrase(inv.pass) else setWpa2Passphrase(inv.pass)
         }.build()
@@ -248,6 +283,7 @@ class HotspotClient(private val ctx: Context) : Closeable {
     }
 
     override fun close() {
+        legacy?.close(); legacy = null
         runCatching { cm.bindProcessToNetwork(null) }
         cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
         cb = null

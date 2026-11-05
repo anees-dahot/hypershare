@@ -99,12 +99,16 @@ class Source private constructor(private val pfd: ParcelFileDescriptor?, private
 class Sink private constructor(
     private val ctx: Context, private val uri: Uri?,
     private val pfd: ParcelFileDescriptor?, private val ch: FileChannel?,
+    /** Android 8–9 only: the file written directly in Download/HyperShare. */
+    private val file: java.io.File? = null,
 ) {
     @Volatile private var finished = false
     @Volatile private var aborted = false
 
     /** Content URI once the file is complete and visible to other apps. */
-    val readyUri: Uri? get() = if (finished) uri else null
+    val readyUri: Uri? get() = if (!finished) null else uri ?: file?.let {
+        androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", it)
+    }
 
     /** Thread-safe positional write. */
     fun write(b: ByteBuffer, pos: Long) {
@@ -117,6 +121,7 @@ class Sink private constructor(
         if (finished || aborted) return
         ch?.close(); pfd?.close()
         uri?.let { ctx.contentResolver.update(it, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null) }
+        file?.let { android.media.MediaScannerConnection.scanFile(ctx, arrayOf(it.path), null, null) }
         finished = true
     }
 
@@ -126,6 +131,7 @@ class Sink private constructor(
         aborted = true
         runCatching { ch?.close(); pfd?.close() }
         uri?.let { runCatching { ctx.contentResolver.delete(it, null, null) } }
+        file?.let { runCatching { it.delete() } }
     }
 
     companion object {
@@ -134,6 +140,7 @@ class Sink private constructor(
             val parts = name.split('/').map { it.trim() }.filter { it.isNotEmpty() && it != "." && it != ".." }
             val file = parts.lastOrNull() ?: "file"
             val dirs = parts.dropLast(1).joinToString("/")
+            if (android.os.Build.VERSION.SDK_INT < 29) return openLegacy(ctx, file, dirs)
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, file)
                 put(MediaStore.Downloads.MIME_TYPE, mime)
@@ -145,6 +152,18 @@ class Sink private constructor(
             val uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw IOException("Can't create $file")
             val pfd = cr.openFileDescriptor(uri, "rw") ?: throw IOException("Can't write $file")
             return Sink(ctx, uri, pfd, FileOutputStream(pfd.fileDescriptor).channel)
+        }
+    
+        @Suppress("DEPRECATION")
+        private fun openLegacy(ctx: Context, name: String, dirs: String): Sink {
+            val root = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "HyperShare")
+            val dir = if (dirs.isEmpty()) root else java.io.File(root, dirs)
+            if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Can't create ${dir.path}. Allow storage access.")
+            val stem = name.substringBeforeLast('.', name); val ext = name.substringAfterLast('.', "")
+            var f = java.io.File(dir, name); var n = 1
+            while (f.exists()) { f = java.io.File(dir, if (ext.isEmpty()) "$stem ($n)" else "$stem ($n).$ext"); n++ }
+            val raf = java.io.RandomAccessFile(f, "rw")
+            return Sink(ctx, null, null, raf.channel, f)
         }
     }
 }

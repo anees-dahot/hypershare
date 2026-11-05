@@ -30,11 +30,13 @@ class TransferService : Service() {
             .setContentTitle("HyperShare transfer active")
             .setOngoing(true)
             .build()
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        if (android.os.Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        else startForeground(1, n)
 
-        if (wifiLock == null) {
+        if (wakeLock == null) {
             // Disables Wi-Fi power save: big win for sustained throughput.
-            wifiLock = getSystemService(WifiManager::class.java)
+            // LOW_LATENCY only exists on Android 10+; passing it on 8–9 throws.
+            if (android.os.Build.VERSION.SDK_INT >= 29) wifiLock = getSystemService(WifiManager::class.java)
                 .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "hypershare")
                 .apply { setReferenceCounted(false); acquire() }
             // Older Android honours HIGH_PERF (no-op on 14+, where LOW_LATENCY covers it).

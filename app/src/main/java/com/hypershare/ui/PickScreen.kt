@@ -268,7 +268,7 @@ private fun MediaGrid(list: List<Entity>?, selected: Map<String, Entity>, cols: 
             val bmp by produceState(gridThumbs.get(e.key), e.key) {
                 if (value != null) return@produceState
                 value = withContext(Dispatchers.IO) {
-                    runCatching { ctx.contentResolver.loadThumbnail(e.thumb!!, Size(256, 256), null) }.getOrNull()
+                    e.thumb?.let { thumbOf(ctx, it, e.mime, 256) }
                 }?.also { gridThumbs.put(e.key, it) }
             }
             Box(

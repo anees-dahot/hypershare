@@ -16,7 +16,7 @@ The receiving phone shows a QR code, the sending phone scans it, and the files g
 
 ## Download
 
-Get the APK from [Releases](../../releases/latest). You need Android 10 or newer, with Wi-Fi turned on.
+Get the APK from [Releases](../../releases/latest). You need Android 8 or newer, with Wi-Fi turned on. On Android 8–9 the sending phone briefly leaves its normal Wi-Fi network while it joins the receiver; it reconnects afterwards.
 
 After that, the app updates itself: it checks GitHub Releases on launch and shows an **Update** banner when a new version is out.
 

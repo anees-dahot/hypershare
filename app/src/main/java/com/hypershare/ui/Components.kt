@@ -122,6 +122,31 @@ private fun launch(ctx: Context, intent: () -> Intent) {
 
 private val thumbCache = LruCache<String, Bitmap>(80)
 
+/** Thumbnail for a content URI; Android 10+ API, with decoding fallbacks for 8–9. */
+fun thumbOf(ctx: Context, uri: Uri, mime: String, px: Int): Bitmap? = runCatching {
+    if (android.os.Build.VERSION.SDK_INT >= 29) return@runCatching ctx.contentResolver.loadThumbnail(uri, Size(px, px), null)
+    when {
+        mime.startsWith("video/") -> android.media.MediaMetadataRetriever().run {
+            try { setDataSource(ctx, uri); getFrameAtTime(1_000_000)?.let { scaled(it, px) } } finally { release() }
+        }
+        mime.startsWith("image/") -> {
+            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            ctx.contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, o) }
+            var sample = 1
+            while (o.outWidth / (sample * 2) >= px && o.outHeight / (sample * 2) >= px) sample *= 2
+            ctx.contentResolver.openInputStream(uri)?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+            }
+        }
+        else -> null
+    }
+}.getOrNull()
+
+private fun scaled(b: Bitmap, px: Int): Bitmap {
+    val k = px.toFloat() / maxOf(b.width, b.height)
+    return if (k >= 1f) b else Bitmap.createScaledBitmap(b, (b.width * k).toInt().coerceAtLeast(1), (b.height * k).toInt().coerceAtLeast(1), true)
+}
+
 @Composable
 fun FileThumb(uri: Uri?, mime: String, name: String, size: Dp = 48.dp) {
     val ctx = LocalContext.current
@@ -129,7 +154,7 @@ fun FileThumb(uri: Uri?, mime: String, name: String, size: Dp = 48.dp) {
     val bmp by produceState(key?.let { thumbCache.get(it) }, key) {
         if (key == null || value != null) return@produceState
         value = withContext(Dispatchers.IO) {
-            runCatching { ctx.contentResolver.loadThumbnail(uri, Size(192, 192), null) }.getOrNull()
+            thumbOf(ctx, uri, mime, 192)
         }?.also { thumbCache.put(key, it) }
     }
     val shape = RoundedCornerShape(10.dp)
