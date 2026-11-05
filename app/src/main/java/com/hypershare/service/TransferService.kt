@@ -17,6 +17,7 @@ import android.os.PowerManager
  */
 class TransferService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
+    private var perfLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -36,6 +37,11 @@ class TransferService : Service() {
             wifiLock = getSystemService(WifiManager::class.java)
                 .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "hypershare")
                 .apply { setReferenceCounted(false); acquire() }
+            // Older Android honours HIGH_PERF (no-op on 14+, where LOW_LATENCY covers it).
+            @Suppress("DEPRECATION")
+            perfLock = getSystemService(WifiManager::class.java)
+                .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "hypershare-perf")
+                .apply { setReferenceCounted(false); acquire() }
             wakeLock = getSystemService(PowerManager::class.java)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "hypershare:transfer")
                 .apply { setReferenceCounted(false); acquire(3 * 60 * 60 * 1000L) }
@@ -45,6 +51,7 @@ class TransferService : Service() {
 
     override fun onDestroy() {
         wifiLock?.release()
+        perfLock?.release()
         wakeLock?.release()
         super.onDestroy()
     }

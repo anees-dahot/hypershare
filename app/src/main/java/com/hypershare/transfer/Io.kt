@@ -21,10 +21,8 @@ object Proto {
     const val PORT = 8988
     /** Wi-Fi Direct group owner always has this address on Android. */
     const val GO_IP = "192.168.49.1"
-    const val MAGIC = 0x48535831 // "HSX1"
+    const val MAGIC = 0x48535832 // "HSX2"
     const val CHUNK = 4 * 1024 * 1024
-    const val STREAMS = 4
-    const val SOCK_BUF = 4 * 1024 * 1024
     /** Chunk header: fileIdx Int, offset Long, len Int, crc Int. fileIdx -1 = end of stream. */
     const val HDR = 20
     const val BENCH_NAME = "__bench__"
@@ -43,16 +41,16 @@ fun chunksOf(sizes: List<Long>): List<Chunk> = buildList {
     }
 }
 
-fun tune(sc: SocketChannel) = sc.socket().apply {
-    tcpNoDelay = true
-    sendBufferSize = Proto.SOCK_BUF
-    receiveBufferSize = Proto.SOCK_BUF
-}
+/**
+ * Only disable Nagle. Do NOT set SO_SNDBUF/SO_RCVBUF: on Linux that pins the buffer size and
+ * turns off TCP autotuning, which made throughput jumpy in v0.1.
+ */
+fun tune(sc: SocketChannel) { sc.socket().tcpNoDelay = true }
 
 fun openClient(): SocketChannel {
     val sc = SocketChannel.open()
     try {
-        tune(sc) // before connect so the TCP window scale is negotiated big
+        tune(sc)
         sc.socket().connect(InetSocketAddress(Proto.GO_IP, Proto.PORT), 2000)
         return sc
     } catch (e: IOException) {
@@ -61,7 +59,7 @@ fun openClient(): SocketChannel {
 }
 
 fun readFully(sc: SocketChannel, b: ByteBuffer) {
-    while (b.hasRemaining()) if (sc.read(b) < 0) throw EOFException("Peer closed connection")
+    while (b.hasRemaining()) if (sc.read(b) < 0) throw EOFException("Connection lost")
 }
 
 fun writeFully(sc: SocketChannel, vararg bs: ByteBuffer) {
@@ -70,7 +68,7 @@ fun writeFully(sc: SocketChannel, vararg bs: ByteBuffer) {
 
 /** A file being sent. Bench source sends a zeroed buffer without touching storage. */
 class Source private constructor(
-    val name: String, val size: Long,
+    val name: String, val size: Long, val mime: String,
     private val pfd: ParcelFileDescriptor?, private val ch: FileChannel?,
 ) {
     /** Fill [b] (position..limit) from file offset [pos]. Thread-safe (positional read). */
@@ -79,15 +77,15 @@ class Source private constructor(
         var p = pos
         while (b.hasRemaining()) {
             val n = ch.read(b, p)
-            if (n < 0) throw EOFException("$name shrank while sending")
+            if (n < 0) throw EOFException("$name got shorter while sending")
             p += n
         }
     }
 
-    fun close() { ch?.close(); pfd?.close() }
+    fun close() { runCatching { ch?.close(); pfd?.close() } }
 
     companion object {
-        fun bench() = Source(Proto.BENCH_NAME, Proto.BENCH_SIZE, null, null)
+        fun bench() = Source(Proto.BENCH_NAME, Proto.BENCH_SIZE, "application/octet-stream", null, null)
 
         fun open(ctx: Context, uri: Uri): Source {
             val cr = ctx.contentResolver
@@ -98,9 +96,10 @@ class Source private constructor(
                     if (!it.isNull(1)) size = it.getLong(1)
                 }
             }
+            val mime = cr.getType(uri) ?: "application/octet-stream"
             val pfd = cr.openFileDescriptor(uri, "r") ?: throw IOException("Can't open $name")
             if (size < 0) size = pfd.statSize
-            return Source(name, size, pfd, FileInputStream(pfd.fileDescriptor).channel)
+            return Source(name, size, mime, pfd, FileInputStream(pfd.fileDescriptor).channel)
         }
     }
 }
@@ -110,6 +109,11 @@ class Sink private constructor(
     private val ctx: Context, private val uri: Uri?,
     private val pfd: ParcelFileDescriptor?, private val ch: FileChannel?,
 ) {
+    @Volatile private var finished = false
+
+    /** Content URI once the file is complete and visible to other apps. */
+    val readyUri: Uri? get() = if (finished) uri else null
+
     /** Thread-safe positional write. */
     fun write(b: ByteBuffer, pos: Long) {
         if (ch == null) return
@@ -117,23 +121,27 @@ class Sink private constructor(
         while (b.hasRemaining()) p += ch.write(b, p)
     }
 
-    fun finish() {
+    @Synchronized fun finish() {
+        if (finished) return
         ch?.close(); pfd?.close()
-        uri ?: return
-        ctx.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+        uri?.let { ctx.contentResolver.update(it, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null) }
+        finished = true
     }
 
-    fun abort() {
+    /** Delete a half-written file. Finished files are kept. */
+    @Synchronized fun abort() {
+        if (finished) return
         runCatching { ch?.close(); pfd?.close() }
         uri?.let { runCatching { ctx.contentResolver.delete(it, null, null) } }
     }
 
     companion object {
-        fun open(ctx: Context, name: String): Sink {
+        fun open(ctx: Context, name: String, mime: String): Sink {
             if (name == Proto.BENCH_NAME) return Sink(ctx, null, null, null)
             val cr = ctx.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, File(name).name.ifBlank { "file" })
+                put(MediaStore.Downloads.MIME_TYPE, mime)
                 put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/HyperShare")
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }

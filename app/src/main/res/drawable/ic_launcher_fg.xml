@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two offset arrows (send / receive) inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M44,34 L56,48 L48,48 L48,70 L40,70 L40,48 L32,48 Z" />
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.72"
+        android:pathData="M64,74 L52,60 L60,60 L60,38 L68,38 L68,60 L76,60 Z" />
+</vector>
