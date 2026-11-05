@@ -10,12 +10,27 @@ import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
+import com.hypershare.transfer.Engine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /**
  * Keeps the process alive and the radio awake while a transfer runs.
  * Transfer logic lives in Engine; this only owns the foreground notification + locks.
+ *
+ * Lifecycle rule: nobody stops this service from outside. Android kills the app if a service
+ * started with startForegroundService() is stopped before it calls startForeground()
+ * (ForegroundServiceDidNotStartInTimeException). So it always goes foreground first, then
+ * stops itself once [Engine.needService] turns false.
  */
 class TransferService : Service() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var watcher: Job? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var perfLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -48,10 +63,16 @@ class TransferService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "hypershare:transfer")
                 .apply { setReferenceCounted(false); acquire(3 * 60 * 60 * 1000L) }
         }
+        if (watcher == null) watcher = scope.launch {
+            Engine.needService.first { !it }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        scope.cancel()
         wifiLock?.release()
         perfLock?.release()
         wakeLock?.release()
@@ -60,7 +81,9 @@ class TransferService : Service() {
 
     companion object {
         private const val CH = "transfers"
-        fun start(ctx: Context) { ctx.startForegroundService(Intent(ctx, TransferService::class.java)) }
-        fun stop(ctx: Context) { ctx.stopService(Intent(ctx, TransferService::class.java)) }
+        fun start(ctx: Context) {
+            runCatching { ctx.startForegroundService(Intent(ctx, TransferService::class.java)) }
+                .onFailure { com.hypershare.CrashLog.save(it, "Couldn't start transfer service (transfer continues)") }
+        }
     }
 }

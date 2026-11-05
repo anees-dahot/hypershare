@@ -169,6 +169,11 @@ class MainActivity : ComponentActivity() {
      *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX3|L|-|-|0|0|10.0.2.2' [--ez debug_bench true]
      */
     private fun debugHook(i: android.content.Intent) {
+        if (i.getBooleanExtra("debug_fgs_race", false)) {
+            // Recreates v0.4.0's bug: start the foreground service, then stop it before it can go foreground.
+            com.hypershare.service.TransferService.start(this)
+            stopService(android.content.Intent(this, com.hypershare.service.TransferService::class.java)); return
+        }
         if (i.getBooleanExtra("debug_crash", false)) { Thread { throw IllegalStateException("Test crash from debug hook") }.start(); return }
         if (i.getBooleanExtra("debug_receive_lan", false)) { picking = false; Engine.startReceive(this, lan = true); return }
         val qr = i.getStringExtra("debug_send_qr") ?: return

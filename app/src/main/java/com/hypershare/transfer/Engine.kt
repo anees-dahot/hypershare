@@ -149,6 +149,9 @@ object Engine {
 
     val state = MutableStateFlow(UiState())
 
+    /** True while a session runs; TransferService watches it and stops itself when false. */
+    val needService = MutableStateFlow(false)
+
     /** Any stray coroutine error is recorded and shown, never allowed to close the app. */
     private val guardHandler = CoroutineExceptionHandler { _, e ->
         com.hypershare.CrashLog.save(e, "Unhandled transfer error (app kept running)")
@@ -203,6 +206,7 @@ object Engine {
         val app = ctx.applicationContext
         val s = Session(app, role, bench, g).also { sess = it }
         state.value = UiState(phase = Phase.Preparing, role = role, bench = bench)
+        needService.value = true
         TransferService.start(app)
         job = scope.launch {
             try {
@@ -221,12 +225,12 @@ object Engine {
             } finally {
                 withContext(NonCancellable) { s.close(userCancel = false) }
                 if (sess === s) sess = null
+                if (sess == null) needService.value = false
                 val doneFiles = s.tracks.filter { it.done && it.name != Proto.BENCH_NAME }
                 if (doneFiles.isNotEmpty()) History.add(app, doneFiles.map {
                     HistoryItem(role.name, it.name.substringAfterLast('/'), it.size, it.mime,
                         (it.sink?.readyUri ?: it.uri)?.toString(), System.currentTimeMillis())
                 })
-                TransferService.stop(app)
             }
         }
     }
