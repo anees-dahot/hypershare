@@ -75,6 +75,10 @@ data class UiState(
     val samples: List<Float> = emptyList(),
     val elapsedMs: Long = 0,
     val etaSec: Long = -1,
+    /** What the connection is doing right now ("Joining Wi-Fi Direct…"). */
+    val step: String? = null,
+    /** How long connecting took, by stage — shown so slow phases can be spotted. */
+    val connectLog: String? = null,
 ) {
     val active get() = phase in setOf(Phase.Preparing, Phase.Waiting, Phase.Connecting, Phase.Transferring)
 }
@@ -363,23 +367,36 @@ object Engine {
 
     private suspend fun CoroutineScope.send(s: Session, items: List<Picked>, inv: Invite) {
         val ctx = s.ctx
-        set(s.gen) { it.copy(phase = Phase.Connecting, link = linkLabel(inv.type, inv.freq), freqMhz = inv.freq) }
+        val t0 = System.nanoTime()
+        fun secs() = (System.nanoTime() - t0) / 1e9
+        set(s.gen) { it.copy(phase = Phase.Connecting, link = linkLabel(inv.type, inv.freq), freqMhz = inv.freq, step = "Joining the receiver…") }
+        var linkSecs = 0.0
+        var ips = inv.ips
         if (inv.type == Invite.LAN) {
             // debug: already on a shared network
         } else if (inv.type == Invite.HOTSPOT) {
-            set(s.gen) { it.copy(tip = "Joining the receiver's hotspot. If Android shows a \"connect to device\" popup, tap the network in it.") }
+            set(s.gen) { it.copy(step = "Joining the receiver's hotspot…", tip = "If Android shows a \"connect to device\" popup, tap the network in it.") }
             val h = s.keep(HotspotClient(ctx))
             h.join(inv)
+            linkSecs = secs()
             set(s.gen) { it.copy(freqMhz = h.freq, link = linkLabel(inv.type, h.freq), tip = null) }
         } else {
+            set(s.gen) { it.copy(step = "Joining Wi-Fi Direct…") }
             val p = s.keep(P2p(ctx))
             p.join(inv)
+            // Wait for Android to say the link is up, then connect at once to the owner it reports.
+            p.awaitGroup(30_000)?.let { go -> ips = (listOf(go) + ips).distinct() }
+            linkSecs = secs()
             val f = if (inv.freq > 0) inv.freq else p.legacyFreq
             set(s.gen) { it.copy(freqMhz = f, link = linkLabel(inv.type, f), tip = if (p.legacyFreq > 0) null else tipFor(staFreq(ctx), f)) }
         }
+        set(s.gen) { it.copy(step = "Linked. Opening connection…") }
 
-        val (ctrl, ip) = connectCtrl(inv.ips)
+        val (ctrl, ip) = connectCtrl(ips)
         s.keep(ctrl)
+        val total = secs()
+        val log = String.format(java.util.Locale.US, "Connected in %.1f s (link %.1f s, network %.1f s)", total, linkSecs, total - linkSecs)
+        set(s.gen) { it.copy(step = null, connectLog = log) }
         val din = DataInputStream(BufferedInputStream(ctrl.getInputStream()))
         s.dout = DataOutputStream(BufferedOutputStream(ctrl.getOutputStream()))
         val streams = Prefs.streams(ctx)
@@ -449,15 +466,19 @@ object Engine {
     /** Link formation takes a few seconds after join, so retry each advertised IP. */
     private suspend fun connectCtrl(ips: List<String>): Pair<Socket, String> {
         if (ips.isEmpty()) throw IOException("Receiver's code has no address")
-        repeat(60) { i ->
-            val ip = ips[i % ips.size]
+        // Short attempts, quick retries: right after the link comes up the address
+        // (DHCP) may need a moment, and each failed try should cost little.
+        val end = System.currentTimeMillis() + 45_000
+        var i = 0
+        while (System.currentTimeMillis() < end) {
+            val ip = ips[i++ % ips.size]
             val sock = Socket()
             try {
-                runInterruptible { sock.connect(InetSocketAddress(ip, Proto.CTRL_PORT), 2000) }
+                runInterruptible { sock.connect(InetSocketAddress(ip, Proto.CTRL_PORT), 1200) }
                 sock.tcpNoDelay = true
                 return sock to ip
             } catch (e: IOException) {
-                sock.close(); delay(500)
+                sock.close(); delay(250)
             }
         }
         throw IOException("Can't reach the receiver. Is its code still on screen?")

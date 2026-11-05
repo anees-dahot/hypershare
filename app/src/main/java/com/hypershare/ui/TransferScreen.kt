@@ -216,9 +216,15 @@ private fun SpeedCard(s: UiState) {
             )
         }
         Spacer(Modifier.height(6.dp))
-        Row {
+        if (s.phase == Phase.Connecting || s.phase == Phase.Preparing) {
+            Text(s.step ?: "Connecting…", style = MaterialTheme.typography.bodySmall)
+        } else Row {
             Text("${fmtBytes(s.done)} of ${fmtBytes(s.total)}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
             Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+        }
+        s.connectLog?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

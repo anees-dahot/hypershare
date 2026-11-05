@@ -137,6 +137,23 @@ class P2p(private val ctx: Context) : Closeable {
         act { mgr.connect(ch, cfg, it) }
     }
 
+    /**
+     * Sender: wait until Android reports the group is formed, and return the owner's address.
+     * Much faster than blindly retrying TCP connects while the link is still coming up.
+     */
+    suspend fun awaitGroup(timeoutMs: Long): String? {
+        if (legacy != null) return null
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            val info = suspendCancellableCoroutine<android.net.wifi.p2p.WifiP2pInfo?> { c ->
+                mgr.requestConnectionInfo(ch) { if (c.isActive) c.resume(it) }
+            }
+            if (info != null && info.groupFormed && !info.isGroupOwner) return info.groupOwnerAddress?.hostAddress
+            delay(200)
+        }
+        return null
+    }
+
     private suspend fun groupInfo(): WifiP2pGroup? =
         suspendCancellableCoroutine { c -> mgr.requestGroupInfo(ch) { if (c.isActive) c.resume(it) } }
 
