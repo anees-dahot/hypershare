@@ -1,7 +1,6 @@
 package com.hypershare.ui
 
 import android.Manifest
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -25,7 +24,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.hypershare.BuildConfig
+import com.hypershare.data.Entity
 import com.hypershare.data.History
+import com.hypershare.data.MediaKind
+import com.hypershare.data.MediaRepo
+import com.hypershare.data.Picked
 import com.hypershare.data.Prefs
 import com.hypershare.transfer.Engine
 import com.hypershare.transfer.Phase
@@ -35,23 +38,35 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.launch
 
-private enum class Screen { Home, Review, Receive, Transfer }
+private enum class Screen { Home, Pick, Receive, Transfer }
 
 class MainActivity : ComponentActivity() {
-    private var picked by mutableStateOf(listOf<Uri>())
+    /** Picker selection; lives here so it survives screen switches. */
+    private val selected = mutableStateMapOf<String, Entity>()
+    private val docs = mutableStateListOf<Entity>()
+    private var picking by mutableStateOf(false)
+    private var adding by mutableStateOf(false)
+    private var pendingItems: List<Picked> = emptyList()
     private var pendingBench = false
 
     private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
 
     private val scanner = registerForActivityResult(ScanContract()) { r ->
         r.contents?.let {
-            Engine.startSend(this, if (pendingBench) emptyList() else picked, it, pendingBench)
-            picked = emptyList()
+            Engine.startSend(this, pendingItems, it, pendingBench)
+            picking = false
+            selected.clear()
         }
     }
 
-    private val picker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) picked = (picked + uris).distinct()
+    private fun sendSelected() {
+        val items = selected.values.flatMap { it.parts }
+        if (adding) {
+            Engine.addFiles(items)
+            selected.clear(); picking = false; adding = false
+        } else {
+            pendingItems = items; pendingBench = false; scan()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +82,7 @@ class MainActivity : ComponentActivity() {
             } else add(Manifest.permission.ACCESS_FINE_LOCATION)
         }.toTypedArray())
         lifecycleScope.launch { Updater.check() }
+        if (BuildConfig.DEBUG) debugHook(intent)
 
         setContent {
             HyperTheme {
@@ -83,7 +99,7 @@ class MainActivity : ComponentActivity() {
         var settings by remember { mutableStateOf(false) }
 
         val screen = when {
-            s.phase == Phase.Idle && picked.isNotEmpty() -> Screen.Review
+            picking -> Screen.Pick
             s.phase == Phase.Idle -> Screen.Home
             s.role == Role.Receive && (s.phase == Phase.Preparing || s.phase == Phase.Waiting) -> Screen.Receive
             else -> Screen.Transfer
@@ -97,7 +113,7 @@ class MainActivity : ComponentActivity() {
 
         BackHandler(screen != Screen.Home) {
             when (screen) {
-                Screen.Review -> picked = emptyList()
+                Screen.Pick -> { picking = false; adding = false }
                 Screen.Receive -> Engine.reset()
                 Screen.Transfer -> if (s.active) moveTaskToBack(true) else Engine.reset()
                 Screen.Home -> Unit
@@ -116,24 +132,48 @@ class MainActivity : ComponentActivity() {
             when (sc) {
                 Screen.Home -> HomeScreen(
                     history, update,
-                    onSend = { picker.launch(arrayOf("*/*")) },
+                    onSend = { adding = false; picking = true },
                     onReceive = { Engine.startReceive(this@MainActivity) },
                     onBench = { pendingBench = true; scan() },
                     onSettings = { settings = true },
                 )
-                Screen.Review -> ReviewScreen(
-                    picked,
-                    onRemove = { u -> picked = picked - u },
-                    onAddMore = { picker.launch(arrayOf("*/*")) },
-                    onScan = { pendingBench = false; scan() },
-                    onBack = { picked = emptyList() },
+                Screen.Pick -> PickScreen(
+                    selected, docs, adding,
+                    onBack = { picking = false; adding = false },
+                    onSend = { sendSelected() },
                 )
                 Screen.Receive -> ReceiveScreen(s, onBack = { Engine.reset() })
-                Screen.Transfer -> TransferScreen(s, onCancel = { Engine.cancel() }, onClose = { Engine.reset() })
+                Screen.Transfer -> TransferScreen(
+                    s,
+                    onSendMore = { adding = true; selected.clear(); picking = true },
+                    onClose = { Engine.reset() },
+                )
             }
         }
 
         if (settings) SettingsSheet(onDismiss = { settings = false })
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        if (BuildConfig.DEBUG) debugHook(intent)
+    }
+
+    /**
+     * Debug builds only: drive a transfer over the existing network without Wi-Fi Direct, for emulator tests.
+     *   am start -n com.hypershare/.ui.MainActivity --ez debug_receive_lan true
+     *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX3|L|-|-|0|0|10.0.2.2' [--ez debug_bench true]
+     */
+    private fun debugHook(i: android.content.Intent) {
+        if (i.getBooleanExtra("debug_receive_lan", false)) { picking = false; Engine.startReceive(this, lan = true); return }
+        val qr = i.getStringExtra("debug_send_qr") ?: return
+        val bench = i.getBooleanExtra("debug_bench", false)
+        lifecycleScope.launch {
+            val items = if (bench) emptyList() else
+                (MediaRepo.media(this@MainActivity, MediaKind.Photos) + MediaRepo.media(this@MainActivity, MediaKind.Videos)).flatMap { it.parts }
+            picking = false
+            Engine.startSend(this@MainActivity, items, qr, bench)
+        }
     }
 
     private fun scan() = scanner.launch(
@@ -151,11 +191,29 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val streams by Prefs.streamsFlow.collectAsStateWithLifecycle()
+    val link by Prefs.linkFlow.collectAsStateWithLifecycle()
     val update by Updater.ui.collectAsStateWithLifecycle()
 
     ModalBottomSheet(onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
         Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             Text("Settings", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(20.dp))
+
+            Text("Connection", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Set on the receiving phone. If Wi-Fi Direct is slow or dips, try Hotspot: many phones run it on a wider 5 GHz channel. The sender confirms joining once.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            val links = listOf(Prefs.LINK_DIRECT to "Wi-Fi Direct", Prefs.LINK_HOTSPOT to "Hotspot")
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                links.forEachIndexed { i, (k, label) ->
+                    SegmentedButton(
+                        selected = link == k, onClick = { Prefs.setLink(ctx, k) },
+                        shape = SegmentedButtonDefaults.itemShape(i, links.size),
+                    ) { Text(label) }
+                }
+            }
             Spacer(Modifier.height(20.dp))
 
             Text("Parallel streams", style = MaterialTheme.typography.titleMedium)

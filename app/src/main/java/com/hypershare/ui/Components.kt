@@ -33,6 +33,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -84,6 +86,7 @@ fun extOf(name: String, mime: String): String {
 }
 
 private fun iconFor(mime: String, name: String): ImageVector = when {
+    mime == com.hypershare.data.DIR_MIME -> Icons.Outlined.Folder
     mime.startsWith("image/") -> Icons.Outlined.Image
     mime.startsWith("video/") -> Icons.Outlined.Movie
     mime.startsWith("audio/") -> Icons.Outlined.MusicNote
@@ -194,6 +197,23 @@ fun bandLabel(freq: Int) = when {
 
 data class RowAction(val icon: ImageVector, val label: String, val onClick: () -> Unit)
 
+/** App icon when [pkg] is installed here, else the file thumbnail. */
+@Composable
+fun ItemThumb(uri: Uri?, mime: String, name: String, pkg: String?, size: Dp = 48.dp) {
+    val ctx = LocalContext.current
+    val icon by produceState(pkg?.let { appIconCache.get(it) }, pkg) {
+        if (pkg == null || value != null) return@produceState
+        value = withContext(Dispatchers.IO) {
+            runCatching { ctx.packageManager.getApplicationIcon(pkg).toBitmap(144, 144) }.getOrNull()
+        }?.also { appIconCache.put(pkg, it) }
+    }
+    val b = icon
+    if (b != null) Image(b.asImageBitmap(), null, Modifier.size(size))
+    else FileThumb(uri, mime, name, size)
+}
+
+private val appIconCache = LruCache<String, Bitmap>(200)
+
 @Composable
 fun FileRow(
     name: String,
@@ -204,15 +224,19 @@ fun FileRow(
     done: Boolean,
     actions: List<RowAction>,
     trailing: String? = null,
+    pkg: String? = null,
+    primary: RowAction? = null,
+    dim: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
     Row(
         Modifier.fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp)
+            .then(if (dim) Modifier.alpha(0.5f) else Modifier),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FileThumb(uri, mime, name)
+        ItemThumb(uri, mime, name, pkg)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
@@ -228,17 +252,23 @@ fun FileRow(
             }
         }
         Spacer(Modifier.width(8.dp))
-        if (actions.isNotEmpty()) {
-            actions.forEach { a ->
-                IconButton(a.onClick, Modifier.size(40.dp)) {
-                    Icon(a.icon, a.label, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
-                }
-            }
-        } else if (done) {
-            DoneBadge()
-        } else if (trailing != null) {
+        if (trailing != null) {
             Text(trailing, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(4.dp))
         }
+        if (primary != null) {
+            FilledTonalButton(
+                primary.onClick, Modifier.height(34.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp),
+            ) { Text(primary.label, style = MaterialTheme.typography.labelLarge) }
+            Spacer(Modifier.width(2.dp))
+        }
+        actions.forEach { a ->
+            IconButton(a.onClick, Modifier.size(40.dp)) {
+                Icon(a.icon, a.label, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            }
+        }
+        if (actions.isEmpty() && primary == null && done) { DoneBadge(); Spacer(Modifier.width(8.dp)) }
     }
 }
 

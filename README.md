@@ -5,13 +5,14 @@ Fast phone-to-phone file transfer for Android over **Wi-Fi Direct**. No internet
 The receiving phone shows a QR code, the sending phone scans it, and the files go straight over a direct 5 GHz Wi-Fi link.
 
 <p>
-  <img src="docs/screenshots/home.png" width="200" alt="Home">
-  <img src="docs/screenshots/send.png" width="200" alt="Send: picked files with thumbnails">
-  <img src="docs/screenshots/receive.png" width="200" alt="Receive: pairing code">
-  <img src="docs/screenshots/settings.png" width="200" alt="Settings">
+  <img src="docs/screenshots/home.png" width="190" alt="Home">
+  <img src="docs/screenshots/pick_videos.png" width="190" alt="Built-in picker: videos">
+  <img src="docs/screenshots/pick_apps.png" width="190" alt="Built-in picker: apps">
+  <img src="docs/screenshots/received.png" width="190" alt="Receiving: per-file actions">
+  <img src="docs/screenshots/settings.png" width="190" alt="Settings">
 </p>
 
-> Screenshots are from the Android emulator. The emulator only has 2.4 GHz, so the Receive screen shows its slow-band warning. Real phones use 5 GHz.
+> Screenshots are from the Android emulator. The transfer screen was captured during an emulator-to-emulator test over a debug-only network link, so its chip reads "LAN (debug)"; real phones show "Wi-Fi Direct" or "Hotspot".
 
 ## Download
 
@@ -24,7 +25,7 @@ After that, the app updates itself: it checks GitHub Releases on launch and show
 ## How to use
 
 1. **Phone A** (receiver): tap **Receive**. A QR code appears.
-2. **Phone B** (sender): tap **Send**, pick the files, then tap **Scan receiver's code**.
+2. **Phone B** (sender): tap **Send**, choose from the Apps, Photos, Videos, Music or Files tabs, tap **Send**, then scan the code.
 3. Files are saved on Phone A in `Downloads/HyperShare`.
 
 **Test link speed** sends 2 GB of dummy data without reading or writing storage. Use it to see your phones' raw link speed.
@@ -41,11 +42,21 @@ The app shows the link frequency it got, along with live and average MB/s.
 
 ## Features
 
-- **Send screen:** check the files before sending, with thumbnails, sizes and file types. Remove or add files before pairing.
-- **Transfer screen:** live speed with a scrolling chart, average, peak and time remaining. Each file shows its own progress, then **Open** and **Share** buttons when it's done.
-- **Recent:** a history of sent and received files; tap one to open it.
-- **Settings:** number of parallel streams (1/2/4/8) and a manual update check.
-- **Dark mode**, and haptic feedback when a transfer finishes.
+- **Built-in picker:** tabs for Apps, Photos, Videos, Music and Files.
+  - **Apps:** sends the APK, including split APKs.
+  - **Files:** use the system picker, or send a whole folder; the receiver keeps its sub-folders.
+- **One open session:** after the first batch, the sender can tap **Send more** without pairing again. **Finish** ends the session on both phones.
+- **Per-file control:** either phone can cancel a single file while it's waiting or in progress.
+- **Actions by file type** when a file arrives:
+  - **Install** for APKs, including split APKs.
+  - **Play** for video and audio.
+  - **Open** for everything else.
+  - **Share** for any file.
+- **Live stats:** a compact speed card with a chart, average, peak and time remaining.
+- **Two connection types** (Settings, chosen on the receiver):
+  - **Wi-Fi Direct** (default).
+  - **Hotspot:** a local-only hotspot. Many phones run it on a wider 5 GHz channel, so it can be faster on the same pair of phones. The sender confirms joining once.
+- **In-app updates** from GitHub Releases, **dark mode**, and a **Recent** list.
 
 ## How it's fast
 
@@ -57,6 +68,17 @@ The app shows the link frequency it got, along with live and average MB/s.
 - **Integrity check:** every chunk carries a CRC32 checksum, which uses the CPU's hardware CRC instruction on ARM so it costs almost nothing.
 - **No TLS:** the Wi-Fi Direct link is already WPA2-encrypted, so there's no second encryption layer slowing it down.
 - **Radio stays awake:** a foreground service holds a `WIFI_MODE_FULL_LOW_LATENCY` Wi-Fi lock and a wake lock during transfers, so Wi-Fi power saving doesn't throttle them.
+
+## Testing without two phones
+
+Debug builds can run a transfer between two emulators over adb port forwarding, skipping the Wi-Fi Direct and hotspot step:
+
+```bash
+emulator -avd <avd> -read-only -port 5560 &  emulator -avd <avd> -read-only -port 5562 &
+adb -s emulator-5560 shell am start -n com.hypershare/.ui.MainActivity --ez debug_receive_lan true
+adb -s emulator-5560 forward tcp:8988 tcp:8988 && adb -s emulator-5560 forward tcp:8989 tcp:8989
+adb -s emulator-5562 shell am start -n com.hypershare/.ui.MainActivity --es debug_send_qr "'HSX3|L|-|-|0|0|10.0.2.2'"
+```
 
 ## Build and release
 
@@ -73,15 +95,16 @@ Requires JDK 17 and Android SDK 36.
 
 | File | What it does |
 |---|---|
-| `p2p/P2p.kt` | Creates and joins the Wi-Fi Direct group; makes the QR invite |
-| `transfer/Engine.kt` | Sender and receiver logic, progress, state |
+| `p2p/P2p.kt` | Wi-Fi Direct group and local-only hotspot (host and join); the QR invite |
+| `data/Media.kt` | Lists apps, photos, videos and music; expands folders |
+| `transfer/Engine.kt` | Session protocol (add/skip/finish over a control socket, 4 data streams), progress, state |
 | `transfer/Io.kt` | Chunk protocol, socket tuning, file reading and writing (MediaStore) |
 | `service/TransferService.kt` | Foreground service, Wi-Fi lock and wake lock |
-| `update/Updater.kt` | Checks GitHub Releases, downloads the APK, installs it with PackageInstaller |
+| `update/Updater.kt`, `Installer.kt` | Self-update from GitHub Releases; installs received APKs (incl. splits) |
 | `data/History.kt` | Recent transfers list and settings |
 | `ui/*.kt` | Compose screens: Home, Send review, Receive, Transfer; theme and components |
 
 ## Limitations
 
-- One transfer at a time, one direction only.
+- One session at a time, one direction only (the receiver can't send back in the same session).
 - No resume: an interrupted transfer starts over.

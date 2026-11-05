@@ -1,6 +1,5 @@
 package com.hypershare.update
 
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -126,25 +125,8 @@ object Updater {
         return out
     }
 
-    private fun commit(ctx: Context, apk: File) {
-        val pi = ctx.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
-            setAppPackageName(ctx.packageName)
-            if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
-        }
-        val id = pi.createSession(params)
-        pi.openSession(id).use { s ->
-            s.openWrite("base.apk", 0, apk.length()).use { o ->
-                apk.inputStream().use { it.copyTo(o) }
-                s.fsync(o)
-            }
-            val cb = PendingIntent.getBroadcast(
-                ctx, id, Intent(ctx, InstallReceiver::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-            )
-            s.commit(cb.intentSender)
-        }
-    }
+    private fun commit(ctx: Context, apk: File) =
+        Installer.install(ctx, listOf(android.net.Uri.fromFile(apk)), selfUpdate = true)
 
     fun newer(a: String, b: String): Boolean {
         val x = a.split('.', '-').mapNotNull { it.toIntOrNull() }
@@ -160,6 +142,7 @@ object Updater {
 /** Receives PackageInstaller results; shows the system confirm dialog when needed. */
 class InstallReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
+        val self = intent.getBooleanExtra(Installer.EXTRA_SELF_UPDATE, false)
         when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 @Suppress("DEPRECATION")
@@ -167,10 +150,14 @@ class InstallReceiver : BroadcastReceiver() {
                 else intent.getParcelableExtra(Intent.EXTRA_INTENT)
                 confirm?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)?.let(ctx::startActivity)
             }
-            PackageInstaller.STATUS_SUCCESS -> Updater.installFinished(null)
-            else -> Updater.installFinished(
-                intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Install cancelled"
-            )
+            PackageInstaller.STATUS_SUCCESS ->
+                if (self) Updater.installFinished(null)
+                else android.widget.Toast.makeText(ctx, "App installed", android.widget.Toast.LENGTH_SHORT).show()
+            else -> {
+                val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Install cancelled"
+                if (self) Updater.installFinished(msg)
+                else android.widget.Toast.makeText(ctx, "Install failed: $msg", android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 }

@@ -69,7 +69,7 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit) {
                     style = MaterialTheme.typography.titleMedium,
                 )
             }
-            bandLabel(s.freqMhz)?.let {
+            s.link?.let {
                 Spacer(Modifier.height(10.dp))
                 Chip(it, warn = s.freqMhz < 5000)
             }

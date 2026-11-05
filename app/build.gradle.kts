@@ -16,8 +16,8 @@ android {
         // API 29: WifiP2pConfig.Builder (network name + passphrase + band) needs Android 10.
         minSdk = 29
         targetSdk = 36
-        versionCode = 200
-        versionName = "0.2.0"
+        versionCode = 300
+        versionName = "0.3.0"
     }
 
     // Release key lives outside the repo (~/.hypershare/keystore.properties).

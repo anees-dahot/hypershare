@@ -4,39 +4,49 @@ import android.content.Context
 import android.net.Uri
 import com.hypershare.data.History
 import com.hypershare.data.HistoryItem
+import com.hypershare.data.Picked
 import com.hypershare.data.Prefs
+import com.hypershare.p2p.HotspotClient
+import com.hypershare.p2p.HotspotHost
 import com.hypershare.p2p.Invite
 import com.hypershare.p2p.P2p
 import com.hypershare.p2p.staFreq
 import com.hypershare.service.TransferService
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.nio.ByteBuffer
-import java.nio.channels.Channels
 import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicLongArray
 import java.util.zip.CRC32
 import kotlin.math.max
+import kotlin.math.min
 
 enum class Role { Send, Receive }
 enum class Phase { Idle, Preparing, Waiting, Connecting, Transferring, Done, Failed }
-enum class FStatus { Queued, Active, Done }
+enum class FStatus { Queued, Active, Done, Skipped }
 
 data class FileItem(
+    val idx: Int,
     val name: String,
     val size: Long,
     val mime: String,
+    val group: String,
     val uri: Uri?,
     val done: Long = 0,
     val status: FStatus = FStatus.Queued,
@@ -46,8 +56,12 @@ data class UiState(
     val phase: Phase = Phase.Idle,
     val role: Role? = null,
     val bench: Boolean = false,
+    /** Session still open: the sender can add more files. */
+    val connected: Boolean = false,
     val error: String? = null,
     val qr: String? = null,
+    /** "Wi-Fi Direct" / "Hotspot". */
+    val link: String? = null,
     val freqMhz: Int = 0,
     val tip: String? = null,
     val files: List<FileItem> = emptyList(),
@@ -65,7 +79,71 @@ data class UiState(
     val active get() = phase in setOf(Phase.Preparing, Phase.Waiting, Phase.Connecting, Phase.Transferring)
 }
 
-/** App-wide transfer state machine. One transfer at a time. */
+private class Track(
+    val idx: Int, val name: String, val size: Long, val mime: String, val group: String,
+    val uri: Uri?, val src: Source?, val sink: Sink?,
+) {
+    val got = AtomicLong()
+    @Volatile var done = false
+    @Volatile var skipped = false
+}
+
+/** One pairing between two phones. Lives until either side says BYE or the link drops. */
+private class Session(val ctx: Context, val role: Role, val bench: Boolean, val gen: Int) {
+    val tracks = CopyOnWriteArrayList<Track>()
+    private val open = CopyOnWriteArrayList<Closeable>()
+    val end = CompletableDeferred<Unit>()
+    val queue = Channel<Chunk>(Channel.UNLIMITED)
+    val added = Channel<Int>(Channel.UNLIMITED)
+    val addLock = Mutex()
+    var dout: DataOutputStream? = null
+    @Volatile var ending = false
+    @Volatile var cancelled = false
+
+    val pending get() = tracks.any { !it.done && !it.skipped }
+
+    fun <T : Closeable> keep(c: T): T = c.also { open += it }
+
+    fun msg(type: Int, body: DataOutputStream.() -> Unit = {}) {
+        val o = dout ?: return
+        synchronized(o) { o.writeByte(type); o.body(); o.flush() }
+    }
+
+    fun fail(e: Throwable) { if (!ending) end.completeExceptionally(e) }
+
+    /** Local end: user tapped Done/Finish (graceful) or Cancel. Tells the peer, then tears down. */
+    fun close(userCancel: Boolean) {
+        if (ending) return
+        cancelled = userCancel && pending
+        ending = true
+        runCatching { msg(Proto.T_BYE) }
+        shutdown()
+    }
+
+    /** Peer said BYE or the control link dropped. */
+    fun peerGone() {
+        if (ending) return
+        ending = true
+        shutdown()
+    }
+
+    private fun shutdown() {
+        queue.close()
+        open.forEach { runCatching { it.close() } }
+        tracks.forEach { t -> t.src?.close(); if (!t.done) t.sink?.abort() }
+        end.complete(Unit)
+    }
+
+    fun skip(idx: Int, tell: Boolean) {
+        val t = tracks.getOrNull(idx) ?: return
+        if (t.done || t.skipped) return
+        t.skipped = true
+        t.sink?.abort()
+        if (tell) runCatching { msg(Proto.T_SKIP) { writeInt(idx) } }
+    }
+}
+
+/** App-wide transfer state machine. One session at a time. */
 object Engine {
     const val CHART_POINTS = 120
 
@@ -73,49 +151,88 @@ object Engine {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
-    @Volatile private var open = CopyOnWriteArrayList<Closeable>()
-    @Volatile private var p2p: P2p? = null
-    @Volatile private var startNs = 0L
+    @Volatile private var gen = 0
+    @Volatile private var sess: Session? = null
 
-    fun startReceive(ctx: Context) = run(ctx, Role.Receive, false) { receive(it) }
+    private fun set(g: Int, f: (UiState) -> UiState) { if (g == gen) state.update(f) }
 
-    fun startSend(ctx: Context, uris: List<Uri>, qr: String, bench: Boolean) {
+    /** [lan]: debug builds only — skip Wi-Fi setup and listen on the existing network (emulator testing). */
+    fun startReceive(ctx: Context, lan: Boolean = false) = run(ctx, Role.Receive, false) { receive(it, lan) }
+
+    fun startSend(ctx: Context, items: List<Picked>, qr: String, bench: Boolean) {
         val inv = try { Invite.decode(qr) } catch (e: Exception) {
-            state.value = UiState(phase = Phase.Failed, role = Role.Send, error = e.message); return
+            gen++; state.value = UiState(phase = Phase.Failed, role = Role.Send, error = e.message); return
         }
-        run(ctx, Role.Send, bench) { send(it, uris, inv, bench) }
+        if (!bench && items.isEmpty()) {
+            gen++; state.value = UiState(phase = Phase.Failed, role = Role.Send, error = "Nothing selected to send."); return
+        }
+        run(ctx, Role.Send, bench) { send(it, if (bench) listOf(Proto.benchItem()) else items, inv) }
     }
 
-    fun cancel() {
+    /** Sender: queue more files on the open session. */
+    fun addFiles(items: List<Picked>) {
+        val s = sess ?: return
+        if (s.role != Role.Send || s.ending || items.isEmpty()) return
+        scope.launch { try { addSend(s, items) } catch (e: Throwable) { s.fail(e) } }
+    }
+
+    /** Either side: cancel one file. */
+    fun skip(idx: Int) { val s = sess ?: return; scope.launch { s.skip(idx, tell = true) } }
+
+    /** Stop now; stays on screen showing what happened. */
+    fun cancel() { val s = sess ?: return; scope.launch { s.close(userCancel = true) } }
+
+    /** Leave the transfer screen: ends the session (tells the other phone) and returns home. */
+    fun reset() {
+        val s = sess
+        sess = null
+        gen++
+        state.value = UiState()
+        if (s != null) scope.launch { s.close(userCancel = true) } else job?.cancel()
+    }
+
+    private fun run(ctx: Context, role: Role, bench: Boolean, block: suspend CoroutineScope.(Session) -> Unit) {
+        sess?.let { old -> scope.launch { old.close(userCancel = true) } }
         job?.cancel()
-        open.forEach { runCatching { it.close() } }
-        if (state.value.active) state.update { it.copy(phase = Phase.Failed, qr = null, error = "Cancelled") }
-    }
-
-    /** Back to the home screen. */
-    fun reset() { cancel(); state.value = UiState() }
-
-    private fun run(ctx: Context, role: Role, bench: Boolean, block: suspend CoroutineScope.(Context) -> Unit) {
-        cancel()
+        val g = ++gen
         val app = ctx.applicationContext
+        val s = Session(app, role, bench, g).also { sess = it }
         state.value = UiState(phase = Phase.Preparing, role = role, bench = bench)
         TransferService.start(app)
-        val mine = CopyOnWriteArrayList<Closeable>().also { open = it }
         job = scope.launch {
-            var p: P2p? = null
             try {
-                p = P2p(app).also { p2p = it }
-                coroutineScope { block(app) }
+                coroutineScope {
+                    block(s)
+                    s.end.await()
+                    coroutineContext.cancelChildren()
+                }
+                finalState(s)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                // A cancelled job fails with socket-closed errors; the user already moved on, so stay quiet.
-                if (isActive) state.update { it.copy(phase = Phase.Failed, qr = null, error = friendly(e)) }
+                if (s.ending) finalState(s)
+                else set(g) { it.copy(phase = Phase.Failed, qr = null, connected = false, mbps = 0.0, error = friendly(e), files = items(s)) }
             } finally {
-                mine.forEach { runCatching { it.close() } }
-                withContext(NonCancellable) { p?.removeGroup(); runCatching { p?.close() } }
+                withContext(NonCancellable) { s.close(userCancel = false) }
+                if (sess === s) sess = null
+                val doneFiles = s.tracks.filter { it.done && it.name != Proto.BENCH_NAME }
+                if (doneFiles.isNotEmpty()) History.add(app, doneFiles.map {
+                    HistoryItem(role.name, it.name.substringAfterLast('/'), it.size, it.mime,
+                        (it.sink?.readyUri ?: it.uri)?.toString(), System.currentTimeMillis())
+                })
                 TransferService.stop(app)
             }
+        }
+    }
+
+    private fun finalState(s: Session) {
+        val left = s.pending
+        set(s.gen) {
+            it.copy(
+                phase = when { s.cancelled -> Phase.Failed; left -> Phase.Failed; else -> Phase.Done },
+                error = when { s.cancelled -> "Cancelled"; left -> "The other phone stopped the transfer."; else -> null },
+                connected = false, qr = null, mbps = 0.0, etaSec = 0, files = items(s),
+            )
         }
     }
 
@@ -124,76 +241,92 @@ object Engine {
         else -> e.message ?: e.toString()
     }
 
-    private fun <T : Closeable> T.tracked(): T = also { open += it }
-
     private fun tipFor(sta: Int, grp: Int): String? = when {
         grp in 1..4999 -> "Linked on 2.4 GHz. Speed tops out near 15 MB/s on this band."
         sta > 0 && grp > 0 && sta != grp ->
             "This phone is also connected to a Wi-Fi network on another channel, so its radio " +
                 "switches back and forth. For steady top speed, disconnect from Wi-Fi networks " +
-                "(keep Wi-Fi itself on) or connect both phones to the same 5 GHz router."
+                "(keep Wi-Fi itself on) or try Hotspot mode in Settings."
         else -> null
     }
 
-    /** Per-file and total byte counters, updated by all streams. */
-    private class Progress(val sizes: List<Long>) {
-        val per = AtomicLongArray(sizes.size)
-        val all = AtomicLong()
-        /** Returns true when this chunk completed its file. */
-        fun add(i: Int, n: Long): Boolean { all.addAndGet(n); return per.addAndGet(i, n) == sizes[i] }
-    }
+    private fun linkLabel(type: Char, freq: Int) =
+        (when (type) { Invite.HOTSPOT -> "Hotspot"; Invite.LAN -> "LAN (debug)"; else -> "Wi-Fi Direct" }) +
+            when { freq <= 0 -> ""; freq < 5000 -> " · 2.4 GHz"; else -> " · 5 GHz ch ${(freq - 5000) / 5}" }
 
     // ---------------------------------------------------------------- receiver
 
-    private suspend fun CoroutineScope.receive(ctx: Context) {
-        val sta = staFreq(ctx)
-        val (inv, group) = p2p!!.createGroup(sta)
-        state.update {
-            it.copy(phase = Phase.Waiting, qr = inv.encode(), freqMhz = group.frequency, tip = tipFor(sta, group.frequency))
+    private suspend fun CoroutineScope.receive(s: Session, lan: Boolean) {
+        val ctx = s.ctx
+        val inv: Invite
+        if (lan) {
+            inv = Invite(Invite.LAN, "-", "-", 0, false, listOf("10.0.2.2"))
+        } else if (Prefs.link(ctx) == Prefs.LINK_HOTSPOT) {
+            val h = s.keep(HotspotHost(ctx))
+            inv = h.start()
+        } else {
+            val p = s.keep(P2p(ctx))
+            val sta = staFreq(ctx)
+            val (i, g) = p.host(sta)
+            inv = i
+            set(s.gen) { it.copy(tip = tipFor(sta, g.frequency)) }
+        }
+        set(s.gen) {
+            it.copy(phase = Phase.Waiting, qr = inv.encode(), freqMhz = inv.freq, link = linkLabel(inv.type, inv.freq))
         }
 
-        val server = ServerSocketChannel.open().tracked()
-        server.socket().reuseAddress = true
-        server.bind(InetSocketAddress(Proto.PORT))
+        val ctrlServer = s.keep(ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(Proto.CTRL_PORT)) })
+        val dataServer = s.keep(ServerSocketChannel.open().apply { socket().reuseAddress = true; bind(InetSocketAddress(Proto.DATA_PORT)) })
 
-        // 1) control connection: manifest
-        val ctrl = server.accept().tracked().also { tune(it) }
-        val din = DataInputStream(Channels.newInputStream(ctrl).buffered())
-        val dout = DataOutputStream(Channels.newOutputStream(ctrl))
+        val ctrl = s.keep(runInterruptible { ctrlServer.accept() }).apply { tcpNoDelay = true }
+        val din = DataInputStream(BufferedInputStream(ctrl.getInputStream()))
+        s.dout = DataOutputStream(BufferedOutputStream(ctrl.getOutputStream()))
         if (din.readInt() != Proto.MAGIC) throw IOException("The other phone runs a different HyperShare version. Update both.")
         val streams = din.readInt().coerceIn(1, 16)
-        val metas = List(din.readInt()) { Triple(din.readUTF(), din.readLong(), din.readUTF()) }
-        val bench = metas.size == 1 && metas[0].first == Proto.BENCH_NAME
-        val sinks = metas.map { Sink.open(ctx, it.first, it.third).also { s -> open += Closeable { s.abort() } } }
-        val total = metas.sumOf { it.second }
-        state.update {
-            it.copy(
-                phase = Phase.Transferring, qr = null, bench = bench, total = total,
-                files = metas.map { m -> FileItem(m.first, m.second, m.third, null) },
-            )
-        }
-        val prog = Progress(metas.map { it.second })
-        metas.forEachIndexed { i, m -> if (m.second == 0L) sinks[i].finish() }
-        dout.writeByte(1); dout.flush()
+        s.msg(1)
+        set(s.gen) { it.copy(phase = Phase.Connecting, qr = null, connected = true) }
 
-        // 2) data connections, all streams write into the files in parallel
-        val uriOf = { i: Int -> sinks[i].readyUri }
-        val ticker = ticker(prog, total, uriOf)
-        try {
-            List(streams) {
-                val sc = server.accept().tracked().also { tune(it) }
-                launch { recvLoop(sc, sinks, prog) }
-            }.joinAll()
-            if (prog.all.get() != total) throw IOException("Transfer incomplete")
-        } finally {
-            ticker.cancel()
+        // Data streams, accepted as the sender opens them.
+        launch {
+            repeat(streams) {
+                val sc = s.keep(dataServer.accept()).also { tune(it) }
+                launch { guard(s) { recvLoop(sc, s) } }
+            }
         }
-        dout.writeByte(1); dout.flush()
-        complete(prog, uriOf)
-        if (!bench) History.add(ctx, state.value.files.map { it.toHistory(Role.Receive) })
+        launch { guard(s) { recvControl(din, s) } }
+        ticker(s)
     }
 
-    private fun recvLoop(sc: SocketChannel, sinks: List<Sink>, prog: Progress) {
+    private fun recvControl(din: DataInputStream, s: Session) {
+        while (true) {
+            val type = try { din.readByte().toInt() } catch (e: IOException) {
+                if (!s.pending) { s.peerGone(); return } else throw e
+            }
+            when (type) {
+                Proto.T_ADD -> {
+                    val n = din.readInt()
+                    val metas = List(n) { Meta(din.readUTF(), din.readLong(), din.readUTF(), din.readUTF()) }
+                    val base = s.tracks.size
+                    val new = metas.mapIndexed { i, m ->
+                        Track(base + i, m.name, m.size, m.mime, m.group, null, null, Sink.open(s.ctx, m.name, m.mime))
+                    }
+                    s.tracks.addAll(new)
+                    s.msg(Proto.T_ADDED) { writeInt(s.tracks.size) }
+                    new.filter { it.size == 0L }.forEach { t ->
+                        t.sink?.finish(); t.done = true
+                        s.msg(Proto.T_FILE_DONE) { writeInt(t.idx) }
+                    }
+                }
+                Proto.T_SKIP -> s.skip(din.readInt(), tell = false)
+                Proto.T_BYE -> { s.peerGone(); return }
+                else -> throw IOException("Unknown message from sender")
+            }
+        }
+    }
+
+    private class Meta(val name: String, val size: Long, val mime: String, val group: String)
+
+    private fun recvLoop(sc: SocketChannel, s: Session) {
         val hdr = ByteBuffer.allocate(Proto.HDR)
         val buf = ByteBuffer.allocateDirect(Proto.CHUNK)
         val crc = CRC32()
@@ -202,136 +335,173 @@ object Engine {
             val idx = hdr.int
             if (idx < 0) break
             val off = hdr.long; val len = hdr.int; val sum = hdr.int
-            if (idx >= sinks.size || len !in 1..Proto.CHUNK) throw IOException("Bad data from sender")
+            val t = s.tracks.getOrNull(idx)
+            if (t == null || len !in 1..Proto.CHUNK) throw IOException("Bad data from sender")
             buf.clear(); buf.limit(len); readFully(sc, buf); buf.flip()
+            if (t.skipped) continue // in flight when cancelled: drop it
             crc.reset(); crc.update(buf); buf.rewind()
             if (crc.value.toInt() != sum) throw IOException("Corrupted data (checksum mismatch)")
-            sinks[idx].write(buf, off)
-            if (prog.add(idx, len.toLong())) sinks[idx].finish()
+            try { t.sink?.write(buf, off) } catch (e: IOException) { if (t.skipped) continue else throw e }
+            if (t.got.addAndGet(len.toLong()) == t.size) {
+                t.sink?.finish(); t.done = true
+                s.msg(Proto.T_FILE_DONE) { writeInt(idx) }
+            }
         }
     }
 
     // ---------------------------------------------------------------- sender
 
-    private suspend fun CoroutineScope.send(ctx: Context, uris: List<Uri>, inv: Invite, bench: Boolean) {
-        val sources = if (bench) listOf(Source.bench()) else uris.map { Source.open(ctx, it) }
-        sources.forEach { s -> open += Closeable { s.close() } }
-        val total = sources.sumOf { it.size }
-        state.update {
-            it.copy(
-                phase = Phase.Connecting, total = total,
-                files = sources.mapIndexed { i, s -> FileItem(s.name, s.size, s.mime, if (bench) null else uris[i]) },
-            )
+    private suspend fun CoroutineScope.send(s: Session, items: List<Picked>, inv: Invite) {
+        val ctx = s.ctx
+        set(s.gen) { it.copy(phase = Phase.Connecting, link = linkLabel(inv.type, inv.freq), freqMhz = inv.freq) }
+        if (inv.type == Invite.LAN) {
+            // debug: already on a shared network
+        } else if (inv.type == Invite.HOTSPOT) {
+            val h = s.keep(HotspotClient(ctx))
+            h.join(inv)
+            set(s.gen) { it.copy(freqMhz = h.freq, link = linkLabel(inv.type, h.freq)) }
+        } else {
+            val p = s.keep(P2p(ctx))
+            p.join(inv)
+            set(s.gen) { it.copy(tip = tipFor(staFreq(ctx), inv.freq)) }
         }
 
-        p2p!!.join(inv)
-        val ctrl = connectRetry()
-        state.update { it.copy(freqMhz = inv.freq, tip = tipFor(staFreq(ctx), inv.freq)) }
-
+        val (ctrl, ip) = connectCtrl(inv.ips)
+        s.keep(ctrl)
+        val din = DataInputStream(BufferedInputStream(ctrl.getInputStream()))
+        s.dout = DataOutputStream(BufferedOutputStream(ctrl.getOutputStream()))
         val streams = Prefs.streams(ctx)
-        val din = DataInputStream(Channels.newInputStream(ctrl))
-        val dout = DataOutputStream(Channels.newOutputStream(ctrl).buffered())
-        dout.writeInt(Proto.MAGIC)
-        dout.writeInt(streams)
-        dout.writeInt(sources.size)
-        sources.forEach { dout.writeUTF(it.name); dout.writeLong(it.size); dout.writeUTF(it.mime) }
-        dout.flush()
-        if (din.readByte().toInt() != 1) throw IOException("Receiver rejected the transfer")
+        synchronized(s.dout!!) { s.dout!!.writeInt(Proto.MAGIC); s.dout!!.writeInt(streams); s.dout!!.flush() }
+        if (din.readByte().toInt() != 1) throw IOException("Receiver rejected the connection")
+        set(s.gen) { it.copy(connected = true) }
 
-        val prog = Progress(sources.map { it.size })
-        val chunks = chunksOf(sources.map { it.size })
-        val next = AtomicInteger()
-        state.update { it.copy(phase = Phase.Transferring) }
-        val uriOf = { i: Int -> if (bench) null else uris[i] }
-        val ticker = ticker(prog, total, uriOf)
-        try {
-            List(streams) {
-                launch { sendLoop(connectRetry(), sources, chunks, next, prog) }
-            }.joinAll()
-            if (din.readByte().toInt() != 1) throw IOException("Receiver reported an error")
-        } finally {
-            ticker.cancel()
+        launch { guard(s) { sendControl(din, s) } }
+        addSend(s, items)
+        repeat(streams) {
+            launch { guard(s) { sendLoop(s.keep(openDataRetry(ip)), s) } }
         }
-        complete(prog, uriOf)
-        if (!bench) History.add(ctx, state.value.files.map { it.toHistory(Role.Send) })
+        ticker(s)
     }
 
-    private fun sendLoop(sc: SocketChannel, src: List<Source>, chunks: List<Chunk>, next: AtomicInteger, prog: Progress) {
-        val hdr = ByteBuffer.allocate(Proto.HDR)
-        val buf = ByteBuffer.allocateDirect(Proto.CHUNK)
-        val crc = CRC32()
+    private suspend fun addSend(s: Session, items: List<Picked>) = s.addLock.withLock {
+        if (s.ending) return@withLock
+        val base = s.tracks.size
+        val new = items.mapIndexed { i, p ->
+            Track(base + i, p.name, p.size, p.mime, p.group, p.uri.takeIf { it != Uri.EMPTY }, Source.open(s.ctx, p), null)
+        }
+        s.tracks.addAll(new)
+        s.msg(Proto.T_ADD) {
+            writeInt(new.size)
+            new.forEach { writeUTF(it.name); writeLong(it.size); writeUTF(it.mime); writeUTF(it.group) }
+        }
+        withTimeout(20_000) { s.added.receive() }
+        new.forEach { t -> chunksOf(t.idx, t.size).forEach { s.queue.trySend(it) } }
+    }
+
+    private fun sendControl(din: DataInputStream, s: Session) {
         while (true) {
-            val i = next.getAndIncrement()
-            if (i >= chunks.size) break
-            val c = chunks[i]
-            buf.clear(); buf.limit(c.len); src[c.file].read(buf, c.off); buf.flip()
-            crc.reset(); crc.update(buf); buf.rewind()
-            hdr.clear(); hdr.putInt(c.file).putLong(c.off).putInt(c.len).putInt(crc.value.toInt()).flip()
-            writeFully(sc, hdr, buf) // gathering write: one syscall for header + data
-            prog.add(c.file, c.len.toLong())
-        }
-        hdr.clear(); hdr.putInt(-1).putLong(0).putInt(0).putInt(0).flip()
-        writeFully(sc, hdr)
-    }
-
-    /** Group formation takes a few seconds after connect() succeeds, so retry. */
-    private suspend fun connectRetry(): SocketChannel {
-        repeat(60) {
-            try { return openClient().tracked() } catch (e: IOException) { delay(500) }
-        }
-        throw IOException("Can't reach the receiver. Is its code still on screen?")
-    }
-
-    // ---------------------------------------------------------------- progress
-
-    private fun filesNow(base: List<FileItem>, prog: Progress, uriOf: (Int) -> Uri?) =
-        base.mapIndexed { i, f ->
-            val d = prog.per.get(i)
-            f.copy(
-                done = d,
-                uri = uriOf(i) ?: f.uri,
-                status = when { d >= f.size -> FStatus.Done; d > 0 -> FStatus.Active; else -> FStatus.Queued },
-            )
-        }
-
-    private fun CoroutineScope.ticker(prog: Progress, total: Long, uriOf: (Int) -> Uri?): Job {
-        val t0 = System.nanoTime().also { startNs = it }
-        return launch {
-            var lastB = 0L; var lastT = t0; var ema = 0.0; var peak = 0.0
-            while (isActive) {
-                delay(250)
-                val now = System.nanoTime(); val b = prog.all.get()
-                val inst = (b - lastB) / 1e6 / ((now - lastT) / 1e9)
-                ema = if (ema == 0.0) inst else ema * 0.75 + inst * 0.25
-                peak = max(peak, ema)
-                val secs = (now - t0) / 1e9
-                val avg = b / 1e6 / secs
-                val eta = if (avg > 0.5) ((total - b) / 1e6 / avg).toLong() else -1
-                state.update {
-                    it.copy(
-                        done = b, mbps = ema, avgMbps = avg, peakMbps = peak, etaSec = eta,
-                        elapsedMs = (secs * 1000).toLong(),
-                        samples = (it.samples + ema.toFloat()).takeLast(CHART_POINTS),
-                        files = filesNow(it.files, prog, uriOf),
-                    )
+            val type = try { din.readByte().toInt() } catch (e: IOException) {
+                if (!s.pending) { s.peerGone(); return } else throw e
+            }
+            when (type) {
+                Proto.T_ADDED -> s.added.trySend(din.readInt())
+                Proto.T_FILE_DONE -> {
+                    s.tracks.getOrNull(din.readInt())?.done = true
+                    // Speed test: finish as soon as the receiver has everything.
+                    if (s.bench && !s.pending) { s.close(userCancel = false); return }
                 }
-                lastB = b; lastT = now
+                Proto.T_SKIP -> s.skip(din.readInt(), tell = false)
+                Proto.T_BYE -> { s.peerGone(); return }
+                else -> throw IOException("Unknown message from receiver")
             }
         }
     }
 
-    private fun complete(prog: Progress, uriOf: (Int) -> Uri?) {
-        val secs = (System.nanoTime() - startNs) / 1e9
-        val b = prog.all.get()
-        state.update {
-            it.copy(
-                phase = Phase.Done, done = b, mbps = 0.0, etaSec = 0,
-                avgMbps = b / 1e6 / secs, elapsedMs = (secs * 1000).toLong(),
-                files = filesNow(it.files, prog, uriOf),
-            )
+    private suspend fun sendLoop(sc: SocketChannel, s: Session) {
+        val hdr = ByteBuffer.allocate(Proto.HDR)
+        val buf = ByteBuffer.allocateDirect(Proto.CHUNK)
+        val crc = CRC32()
+        for (c in s.queue) {
+            val t = s.tracks[c.file]
+            if (t.skipped) continue
+            buf.clear(); buf.limit(c.len); t.src!!.read(buf, c.off); buf.flip()
+            crc.reset(); crc.update(buf); buf.rewind()
+            hdr.clear(); hdr.putInt(c.file).putLong(c.off).putInt(c.len).putInt(crc.value.toInt()).flip()
+            writeFully(sc, hdr, buf) // gathering write: one syscall for header + data
+            t.got.addAndGet(c.len.toLong())
         }
+        hdr.clear(); hdr.putInt(-1).putLong(0).putInt(0).putInt(0).flip()
+        runCatching { writeFully(sc, hdr) }
     }
 
-    private fun FileItem.toHistory(role: Role) =
-        HistoryItem(role.name, name, size, mime, uri?.toString(), System.currentTimeMillis())
+    /** Link formation takes a few seconds after join, so retry each advertised IP. */
+    private suspend fun connectCtrl(ips: List<String>): Pair<Socket, String> {
+        if (ips.isEmpty()) throw IOException("Receiver's code has no address")
+        repeat(60) { i ->
+            val ip = ips[i % ips.size]
+            val sock = Socket()
+            try {
+                runInterruptible { sock.connect(InetSocketAddress(ip, Proto.CTRL_PORT), 2000) }
+                sock.tcpNoDelay = true
+                return sock to ip
+            } catch (e: IOException) {
+                sock.close(); delay(500)
+            }
+        }
+        throw IOException("Can't reach the receiver. Is its code still on screen?")
+    }
+
+    private suspend fun openDataRetry(ip: String): SocketChannel {
+        repeat(10) { try { return openData(ip) } catch (e: IOException) { delay(300) } }
+        return openData(ip)
+    }
+
+    /** Errors after the session is ending are just sockets closing; otherwise they fail the session. */
+    private suspend fun guard(s: Session, block: suspend () -> Unit) {
+        try { block() } catch (e: CancellationException) { throw e } catch (e: Throwable) { if (!s.ending) s.fail(e) }
+    }
+
+    // ---------------------------------------------------------------- progress
+
+    private fun items(s: Session) = s.tracks.map { t ->
+        FileItem(
+            t.idx, t.name, t.size, t.mime, t.group,
+            uri = if (s.role == Role.Receive) t.sink?.readyUri else t.uri,
+            done = min(t.got.get(), t.size),
+            status = when { t.skipped -> FStatus.Skipped; t.done -> FStatus.Done; t.got.get() > 0 -> FStatus.Active; else -> FStatus.Queued },
+        )
+    }
+
+    private fun CoroutineScope.ticker(s: Session) = launch {
+        var lastB = 0L; var lastT = System.nanoTime(); var ema = 0.0; var peak = 0.0
+        var activeNs = 0L; var moved = 0L
+        while (isActive) {
+            delay(250)
+            val now = System.nanoTime()
+            val b = s.tracks.sumOf { it.got.get() }
+            val dt = now - lastT; val db = b - lastB
+            val busy = s.pending
+            val moving = busy || db > 0
+            if (moving) { activeNs += dt; moved += db }
+            val inst = db / 1e6 / (dt / 1e9)
+            ema = if (moving) (if (ema == 0.0) inst else ema * 0.75 + inst * 0.25) else 0.0
+            peak = max(peak, ema)
+            val avg = if (activeNs > 0) moved / 1e6 / (activeNs / 1e9) else 0.0
+            val live = s.tracks.filter { !it.skipped }
+            val total = live.sumOf { it.size }
+            val done = live.sumOf { min(it.got.get(), it.size) }
+            val eta = if (avg > 0.5 && busy) ((total - done) / 1e6 / avg).toLong() else -1
+            set(s.gen) {
+                it.copy(
+                    phase = when { s.tracks.isEmpty() -> Phase.Connecting; busy -> Phase.Transferring; else -> Phase.Done },
+                    bench = s.bench || s.tracks.any { t -> t.name == Proto.BENCH_NAME },
+                    total = total, done = done, mbps = ema, avgMbps = avg, peakMbps = peak, etaSec = eta,
+                    elapsedMs = activeNs / 1_000_000,
+                    samples = if (moving) (it.samples + ema.toFloat()).takeLast(CHART_POINTS) else it.samples,
+                    files = items(s),
+                )
+            }
+            lastB = b; lastT = now
+        }
+    }
 }

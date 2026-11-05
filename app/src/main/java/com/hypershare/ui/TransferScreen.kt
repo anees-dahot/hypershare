@@ -1,7 +1,7 @@
 package com.hypershare.ui
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -10,10 +10,11 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,25 +25,41 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
+import com.hypershare.data.APK_MIME
 import com.hypershare.transfer.Engine
 import com.hypershare.transfer.FStatus
+import com.hypershare.transfer.FileItem
 import com.hypershare.transfer.Phase
 import com.hypershare.transfer.Role
 import com.hypershare.transfer.UiState
+import com.hypershare.update.Installer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 @Composable
-fun TransferScreen(s: UiState, onCancel: () -> Unit, onClose: () -> Unit) {
+fun TransferScreen(s: UiState, onSendMore: () -> Unit, onClose: () -> Unit) {
     val ctx = LocalContext.current
     val haptics = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     LaunchedEffect(s.phase) { if (s.phase == Phase.Done) haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
 
     val sending = s.role == Role.Send
     val title = when (s.phase) {
-        Phase.Done -> if (s.bench) "Speed test done" else if (sending) "Sent" else "Received"
+        Phase.Done -> when { s.bench -> "Speed test done"; s.connected -> "Connected"; sending -> "Sent"; else -> "Received" }
         Phase.Failed -> if (s.error == "Cancelled") "Cancelled" else "Transfer failed"
         Phase.Connecting, Phase.Preparing -> "Connecting"
         else -> if (s.bench) "Testing speed" else if (sending) "Sending" else "Receiving"
+    }
+
+    fun install(f: FileItem) {
+        val parts = if (f.group.isNotEmpty()) s.files.filter { it.group == f.group && it.status == FStatus.Done }.mapNotNull { it.uri }
+        else listOfNotNull(f.uri)
+        scope.launch {
+            val err = withContext(Dispatchers.IO) { runCatching { Installer.install(ctx, parts) }.exceptionOrNull() }
+            if (err != null) Toast.makeText(ctx, "Install failed: ${err.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     Column(Modifier.fillMaxSize().systemBarsPadding()) {
@@ -52,18 +69,18 @@ fun TransferScreen(s: UiState, onCancel: () -> Unit, onClose: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     AnimatedContent(title, label = "title", transitionSpec = {
                         (fadeIn(tween(250)) + slideInVertically { it / 3 }) togetherWith fadeOut(tween(120))
                     }) { Text(it, style = MaterialTheme.typography.headlineSmall) }
                     Spacer(Modifier.width(10.dp))
-                    if (s.phase == Phase.Done) DoneBadge(26.dp)
+                    if (s.phase == Phase.Done && !s.connected) DoneBadge(24.dp)
                     Spacer(Modifier.weight(1f))
-                    bandLabel(s.freqMhz)?.let { Chip(it.substringBefore(" · ch").substringBefore(" · "), warn = s.freqMhz < 5000) }
+                    s.link?.let { Chip(it, warn = s.freqMhz in 1..4999) }
                 }
             }
 
-            item { SpeedPanel(s) }
+            item { SpeedCard(s) }
 
             s.error?.takeIf { s.phase == Phase.Failed && it != "Cancelled" }?.let { err ->
                 item {
@@ -78,119 +95,130 @@ fun TransferScreen(s: UiState, onCancel: () -> Unit, onClose: () -> Unit) {
                 item {
                     val n = s.files.count { it.status == FStatus.Done }
                     SectionLabel("Files", Modifier.padding(top = 4.dp)) {
-                        Text("$n / ${s.files.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$n of ${s.files.size} done", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 item {
                     Panel(Modifier.fillMaxWidth(), padding = 0.dp) {
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(4.dp))
                         s.files.forEachIndexed { i, f ->
-                            val done = f.status == FStatus.Done
-                            val pct = if (f.size > 0) f.done.toFloat() / f.size else 1f
-                            val uri = f.uri
-                            FileRow(
-                                name = f.name, mime = f.mime, uri = if (done || sending) uri else null,
-                                meta = when (f.status) {
-                                    FStatus.Done -> "${fmtBytes(f.size)} · ${extOf(f.name, f.mime)}"
-                                    FStatus.Active -> "${fmtBytes(f.done)} of ${fmtBytes(f.size)}"
-                                    FStatus.Queued -> "${fmtBytes(f.size)} · waiting"
-                                },
-                                progress = if (f.status == FStatus.Active) pct else null,
-                                done = done,
-                                trailing = if (f.status == FStatus.Active) "${(pct * 100).toInt()}%" else null,
-                                actions = if (done && uri != null && s.phase == Phase.Done) listOf(
-                                    RowAction(Icons.Outlined.OpenInNew, "Open") { openFile(ctx, uri, f.mime) },
-                                    RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, f.mime) },
-                                ) else emptyList(),
-                                onClick = if (done && uri != null) ({ openFile(ctx, uri, f.mime) }) else null,
-                            )
-                            if (i < s.files.lastIndex) HorizontalDivider(
-                                Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant,
-                            )
+                            ItemRow(f, sending, s.active || s.connected, onSkip = { Engine.skip(f.idx) }, onInstall = { install(f) })
+                            if (i < s.files.lastIndex) HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         }
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(4.dp))
                     }
                 }
-                if (!sending && s.phase == Phase.Done) item {
+                if (!sending && s.files.any { it.status == FStatus.Done }) item {
                     Text(
                         "Saved in Downloads/HyperShare",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 4.dp),
                     )
                 }
             }
         }
 
-        Box(Modifier.fillMaxWidth().padding(20.dp)) {
-            if (s.active) {
-                OutlinedButton(onCancel, Modifier.fillMaxWidth().height(52.dp)) { Text("Cancel") }
-            } else {
-                Button(onClose, Modifier.fillMaxWidth().height(52.dp)) { Text("Done") }
+        // Bottom actions
+        Row(Modifier.fillMaxWidth().padding(20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            val canAdd = sending && s.connected && !s.bench
+            val busy = s.phase == Phase.Transferring || s.phase == Phase.Connecting || s.phase == Phase.Preparing
+            if (canAdd) OutlinedButton(onSendMore, Modifier.weight(1f).height(52.dp)) {
+                Icon(Icons.Outlined.Add, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Send more")
             }
+            if (busy) OutlinedButton({ Engine.cancel() }, Modifier.weight(1f).height(52.dp)) { Text("Cancel") }
+            else Button(onClose, Modifier.weight(1f).height(52.dp)) { Text(if (s.connected) "Finish" else "Done") }
         }
     }
 }
 
 @Composable
-private fun SpeedPanel(s: UiState) {
+private fun ItemRow(f: FileItem, sending: Boolean, live: Boolean, onSkip: () -> Unit, onInstall: () -> Unit) {
+    val ctx = LocalContext.current
+    val uri = f.uri
+    val pct = if (f.size > 0) f.done.toFloat() / f.size else 1f
+    val isApk = f.mime == APK_MIME || f.name.endsWith(".apk", true)
+    val pending = f.status == FStatus.Queued || f.status == FStatus.Active
+    val primary: RowAction? = when {
+        f.status != FStatus.Done || uri == null || sending -> null
+        isApk -> RowAction(Icons.Outlined.Add, "Install", onInstall)
+        f.mime.startsWith("video/") || f.mime.startsWith("audio/") -> RowAction(Icons.Outlined.Add, "Play") { openFile(ctx, uri, f.mime) }
+        else -> RowAction(Icons.Outlined.Add, "Open") { openFile(ctx, uri, f.mime) }
+    }
+    val icons = when {
+        pending && live -> listOf(RowAction(Icons.Outlined.Close, "Cancel file", onSkip))
+        f.status == FStatus.Done && uri != null && !sending -> listOf(RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, f.mime) })
+        else -> emptyList()
+    }
+    FileRow(
+        name = f.name.substringAfterLast('/'),
+        mime = f.mime,
+        uri = if (f.status == FStatus.Done || sending) uri else null,
+        pkg = f.group.ifEmpty { null },
+        meta = buildString {
+            when (f.status) {
+                FStatus.Done -> append("${fmtBytes(f.size)} · ${extOf(f.name, f.mime)}")
+                FStatus.Active -> append("${fmtBytes(f.done)} of ${fmtBytes(f.size)}")
+                FStatus.Queued -> append("${fmtBytes(f.size)} · waiting")
+                FStatus.Skipped -> append("Cancelled")
+            }
+            if (f.name.contains('/') && f.status != FStatus.Skipped) append(" · ${f.name.substringBeforeLast('/')}")
+        },
+        progress = if (f.status == FStatus.Active) pct else null,
+        trailing = if (f.status == FStatus.Active) "${(pct * 100).toInt()}%" else null,
+        done = f.status == FStatus.Done,
+        primary = primary,
+        actions = icons,
+        dim = f.status == FStatus.Skipped,
+        onClick = if (f.status == FStatus.Done && uri != null && !sending && !isApk) ({ openFile(ctx, uri, f.mime) }) else null,
+    )
+}
+
+/** Compact live stats: big number + avg/peak on one line, short chart, one progress line. */
+@Composable
+private fun SpeedCard(s: UiState) {
     val shown by animateFloatAsState(s.mbps.toFloat(), tween(450), label = "speed")
     val progress = if (s.total > 0) s.done.toFloat() / s.total else 0f
     val p by animateFloatAsState(progress, tween(300), label = "p")
-    val finished = s.phase == Phase.Done
+    val idle = s.phase != Phase.Transferring
 
-    Panel(Modifier.fillMaxWidth(), padding = 20.dp) {
+    Panel(Modifier.fillMaxWidth(), padding = 16.dp) {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                String.format(Locale.US, "%.1f", if (finished) s.avgMbps.toFloat() else shown),
-                style = MaterialTheme.typography.displayMedium,
+                String.format(Locale.US, "%.1f", if (idle) s.avgMbps.toFloat() else shown),
+                style = MaterialTheme.typography.headlineLarge.merge(Numeric),
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(4.dp))
             Text(
-                if (finished) "MB/s average" else "MB/s",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp),
+                if (idle) "MB/s avg" else "MB/s", style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 5.dp),
             )
-        }
-        Spacer(Modifier.height(12.dp))
-        SpeedChart(s.samples, Engine.CHART_POINTS, Modifier.fillMaxWidth().height(88.dp))
-        Spacer(Modifier.height(16.dp))
-
-        AnimatedVisibility(s.phase == Phase.Connecting || s.phase == Phase.Preparing) {
-            LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)))
-        }
-        if (s.total > 0 && s.phase != Phase.Connecting) {
-            LinearProgressIndicator(
-                progress = { p }, Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                trackColor = MaterialTheme.colorScheme.surfaceVariant, drawStopIndicator = {}, gapSize = 0.dp,
-            )
-            Spacer(Modifier.height(8.dp))
-            Row {
+            Spacer(Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "${fmtBytes(s.done)} of ${fmtBytes(s.total)}",
-                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f),
+                    String.format(Locale.US, "avg %.1f · peak %.1f", s.avgMbps, s.peakMbps),
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (idle) fmtDuration(s.elapsedMs / 1000) else "${fmtDuration(s.etaSec)} left",
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Spacer(Modifier.height(14.dp))
-        Row {
-            Stat("Average", String.format(Locale.US, "%.1f MB/s", s.avgMbps), Modifier.weight(1f))
-            Stat("Peak", String.format(Locale.US, "%.1f MB/s", s.peakMbps), Modifier.weight(1f))
-            if (finished) Stat("Time", fmtDuration(s.elapsedMs / 1000), Modifier.weight(1f))
-            else Stat("Remaining", fmtDuration(s.etaSec), Modifier.weight(1f))
+        Spacer(Modifier.height(8.dp))
+        SpeedChart(s.samples, Engine.CHART_POINTS, Modifier.fillMaxWidth().height(44.dp))
+        Spacer(Modifier.height(10.dp))
+        if (s.phase == Phase.Connecting || s.phase == Phase.Preparing) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)))
+        } else {
+            LinearProgressIndicator(
+                progress = { p }, Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                trackColor = MaterialTheme.colorScheme.surfaceVariant, drawStopIndicator = {}, gapSize = 0.dp,
+            )
         }
-    }
-}
-
-@Composable
-private fun Stat(label: String, value: String, modifier: Modifier) {
-    Column(modifier) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(2.dp))
-        Text(value, style = MaterialTheme.typography.titleMedium.merge(Numeric))
+        Spacer(Modifier.height(6.dp))
+        Row {
+            Text("${fmtBytes(s.done)} of ${fmtBytes(s.total)}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
