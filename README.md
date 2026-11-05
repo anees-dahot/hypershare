@@ -24,10 +24,10 @@ After that, the app updates itself: it checks GitHub Releases on launch and show
 ## How to use
 
 1. **Phone A** (receiver): tap **Receive**. A QR code appears.
-2. **Phone B** (sender): tap **Send files**, pick the files, then scan the QR code.
+2. **Phone B** (sender): tap **Send**, pick the files, then tap **Scan receiver's code**.
 3. Files are saved on Phone A in `Downloads/HyperShare`.
 
-**Speed test** sends 2 GB of dummy data without reading or writing storage. Use it to see your phones' raw link speed.
+**Test link speed** sends 2 GB of dummy data without reading or writing storage. Use it to see your phones' raw link speed.
 
 ## Expected speed
 
