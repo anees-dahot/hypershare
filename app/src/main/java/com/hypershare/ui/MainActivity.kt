@@ -17,6 +17,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -97,6 +98,7 @@ class MainActivity : ComponentActivity() {
         val history by History.items.collectAsStateWithLifecycle()
         val update by Updater.ui.collectAsStateWithLifecycle()
         var settings by remember { mutableStateOf(false) }
+        var crash by remember { mutableStateOf(com.hypershare.CrashLog.read()) }
 
         val screen = when {
             picking -> Screen.Pick
@@ -152,6 +154,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (settings) SettingsSheet(onDismiss = { settings = false })
+        crash?.let { report -> CrashDialog(report) { com.hypershare.CrashLog.clear(); crash = null } }
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
@@ -165,6 +168,7 @@ class MainActivity : ComponentActivity() {
      *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX3|L|-|-|0|0|10.0.2.2' [--ez debug_bench true]
      */
     private fun debugHook(i: android.content.Intent) {
+        if (i.getBooleanExtra("debug_crash", false)) { Thread { throw IllegalStateException("Test crash from debug hook") }.start(); return }
         if (i.getBooleanExtra("debug_receive_lan", false)) { picking = false; Engine.startReceive(this, lan = true); return }
         val qr = i.getStringExtra("debug_send_qr") ?: return
         val bench = i.getBooleanExtra("debug_bench", false)
@@ -258,4 +262,50 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
             TextButton({ History.clear(ctx) }, contentPadding = PaddingValues(0.dp)) { Text("Clear recent transfers") }
         }
     }
+}
+
+/** Shown once after a crash or failed transfer: lets the user copy or share the details. */
+@Composable
+private fun CrashDialog(report: String, onDone: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val crashed = report.contains("Crash on thread")
+    AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text(if (crashed) "HyperShare closed unexpectedly" else "Last transfer failed") },
+        text = {
+            Column {
+                Text(
+                    "Send this report to the developer so it can be fixed. It contains your phone model and the error, nothing else.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(12.dp))
+                Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                    Text(
+                        report.lines().take(14).joinToString("\n"),
+                        Modifier.padding(10.dp).heightIn(max = 220.dp)
+                            .verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button({
+                ctx.startActivity(android.content.Intent.createChooser(
+                    android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(android.content.Intent.EXTRA_SUBJECT, "HyperShare crash report")
+                        .putExtra(android.content.Intent.EXTRA_TEXT, report), "Share report",
+                ))
+                onDone()
+            }) { Text("Share") }
+        },
+        dismissButton = {
+            TextButton({
+                val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("HyperShare report", report))
+                android.widget.Toast.makeText(ctx, "Report copied", android.widget.Toast.LENGTH_SHORT).show()
+                onDone()
+            }) { Text("Copy") }
+        },
+    )
 }

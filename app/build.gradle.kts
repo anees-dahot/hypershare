@@ -16,8 +16,8 @@ android {
         // API 29: WifiP2pConfig.Builder (network name + passphrase + band) needs Android 10.
         minSdk = 29
         targetSdk = 36
-        versionCode = 300
-        versionName = "0.3.0"
+        versionCode = 301
+        versionName = "0.3.1"
     }
 
     // Release key lives outside the repo (~/.hypershare/keystore.properties).
@@ -38,6 +38,12 @@ android {
     }
 
     buildTypes {
+        create("minidebug") {
+            initWith(getByName("debug"))
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            matchingFallbacks += listOf("debug")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

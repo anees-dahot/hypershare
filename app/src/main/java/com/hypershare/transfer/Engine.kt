@@ -149,7 +149,12 @@ object Engine {
 
     val state = MutableStateFlow(UiState())
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Any stray coroutine error is recorded and shown, never allowed to close the app. */
+    private val guardHandler = CoroutineExceptionHandler { _, e ->
+        com.hypershare.CrashLog.save(e, "Unhandled transfer error (app kept running)")
+        state.update { it.copy(phase = Phase.Failed, connected = false, mbps = 0.0, error = friendly(e)) }
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + guardHandler)
     private var job: Job? = null
     @Volatile private var gen = 0
     @Volatile private var sess: Session? = null
@@ -210,6 +215,7 @@ object Engine {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
+                if (!s.ending) com.hypershare.CrashLog.save(e, "Transfer failed: ${friendly(e)}")
                 if (s.ending) finalState(s)
                 else set(g) { it.copy(phase = Phase.Failed, qr = null, connected = false, mbps = 0.0, error = friendly(e), files = items(s)) }
             } finally {
@@ -357,9 +363,10 @@ object Engine {
         if (inv.type == Invite.LAN) {
             // debug: already on a shared network
         } else if (inv.type == Invite.HOTSPOT) {
+            set(s.gen) { it.copy(tip = "Joining the receiver's hotspot. If Android shows a \"connect to device\" popup, tap the network in it.") }
             val h = s.keep(HotspotClient(ctx))
             h.join(inv)
-            set(s.gen) { it.copy(freqMhz = h.freq, link = linkLabel(inv.type, h.freq)) }
+            set(s.gen) { it.copy(freqMhz = h.freq, link = linkLabel(inv.type, h.freq), tip = null) }
         } else {
             val p = s.keep(P2p(ctx))
             p.join(inv)
@@ -394,7 +401,7 @@ object Engine {
             writeInt(new.size)
             new.forEach { writeUTF(it.name); writeLong(it.size); writeUTF(it.mime); writeUTF(it.group) }
         }
-        withTimeout(20_000) { s.added.receive() }
+        withTimeoutOrNull(20_000) { s.added.receive() } ?: throw IOException("The receiver stopped responding.")
         new.forEach { t -> chunksOf(t.idx, t.size).forEach { s.queue.trySend(it) } }
     }
 

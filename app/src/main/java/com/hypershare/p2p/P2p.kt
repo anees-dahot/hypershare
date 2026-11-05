@@ -18,7 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.IOException
 import java.net.Inet4Address
@@ -222,7 +222,7 @@ class HotspotClient(private val ctx: Context) : Closeable {
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .setNetworkSpecifier(spec)
             .build()
-        val net = withTimeout(90_000) {
+        val net = withTimeoutOrNull(60_000) {
             suspendCancellableCoroutine<Network> { c ->
                 val callback = object : ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: Network) { if (c.isActive) c.resume(network) }
@@ -231,9 +231,17 @@ class HotspotClient(private val ctx: Context) : Closeable {
                     }
                 }
                 cb = callback
-                cm.requestNetwork(req, callback)
+                try {
+                    cm.requestNetwork(req, callback)
+                } catch (e: Exception) {
+                    // Some OEM builds refuse specifier requests outright (e.g. missing location permission).
+                    if (c.isActive) c.resumeWithException(IOException("This phone refused to join the hotspot (${e.javaClass.simpleName}: ${e.message}). Use Wi-Fi Direct instead."))
+                }
             }
-        }
+        } ?: throw IOException(
+            "Couldn't join the receiver's hotspot. Check that Wi-Fi and Location are on, " +
+                "or switch the receiving phone to Wi-Fi Direct in Settings."
+        )
         // Route all of this app's sockets over the hotspot while the transfer runs.
         cm.bindProcessToNetwork(net)
         freq = (cm.getNetworkCapabilities(net)?.transportInfo as? WifiInfo)?.frequency ?: 0
