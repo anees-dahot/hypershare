@@ -67,9 +67,29 @@ object Prefs {
     fun load(ctx: Context) {
         _streams.value = prefs(ctx).getInt("streams", 4)
         _link.value = link(ctx)
+        _name.value = deviceName(ctx)
     }
     fun link(ctx: Context) = prefs(ctx).getString("link", LINK_DIRECT) ?: LINK_DIRECT
     fun setLink(ctx: Context, v: String) { prefs(ctx).edit().putString("link", v).apply(); _link.value = v }
+    private val _name = MutableStateFlow("")
+    val nameFlow: StateFlow<String> = _name
+
+    /** Name other phones see, e.g. "vivo V60 Lite". */
+    fun deviceName(ctx: Context): String = prefs(ctx).getString("name", null)?.takeIf { it.isNotBlank() } ?: defaultName()
+    fun setDeviceName(ctx: Context, v: String) { prefs(ctx).edit().putString("name", v.trim().take(30)).apply(); _name.value = deviceName(ctx) }
+    private fun defaultName(): String {
+        val maker = android.os.Build.MANUFACTURER.replaceFirstChar { it.uppercase() }
+        val model = android.os.Build.MODEL
+        return (if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model").take(30)
+    }
+
+    /** Receiver: make the Wi-Fi Direct group on 2.4 GHz so 2.4 GHz-only phones can join. */
+    fun only24(ctx: Context) = prefs(ctx).getBoolean("only24", false)
+    fun setOnly24(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("only24", v).apply()
+
+    fun onboarded(ctx: Context) = prefs(ctx).getBoolean("onboarded", false)
+    fun setOnboarded(ctx: Context) = prefs(ctx).edit().putBoolean("onboarded", true).apply()
+
     fun streams(ctx: Context) = prefs(ctx).getInt("streams", 4)
     fun setStreams(ctx: Context, n: Int) { prefs(ctx).edit().putInt("streams", n).apply(); _streams.value = n }
 

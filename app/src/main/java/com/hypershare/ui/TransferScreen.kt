@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,7 +26,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
-import com.hypershare.data.APK_MIME
 import com.hypershare.transfer.Engine
 import com.hypershare.transfer.FStatus
 import com.hypershare.transfer.FileItem
@@ -38,26 +38,57 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
+/** One visible row: a single file, or all APK parts of one app shown together. */
+private data class Row(val key: String, val parts: List<FileItem>) {
+    val first get() = parts.first()
+    val outgoing get() = first.outgoing
+    val size get() = parts.sumOf { it.size }
+    val done get() = parts.sumOf { it.done }
+    val status get() = when {
+        parts.all { it.status == FStatus.Skipped } -> FStatus.Skipped
+        parts.all { it.status == FStatus.Done || it.status == FStatus.Skipped } -> FStatus.Done
+        parts.any { it.status == FStatus.Active || it.status == FStatus.Done } -> FStatus.Active
+        else -> FStatus.Queued
+    }
+    val label get() = if (parts.size == 1) first.name.substringAfterLast('/')
+    else parts.minBy { it.name.length }.name.removeSuffix(".apk")
+}
+
+private fun rows(files: List<FileItem>): List<Row> {
+    val out = LinkedHashMap<String, MutableList<FileItem>>()
+    files.forEach { f ->
+        val k = if (f.group.isNotEmpty()) "${f.outgoing}:g:${f.group}" else "${f.outgoing}:${f.idx}"
+        out.getOrPut(k) { mutableListOf() } += f
+    }
+    return out.map { (k, v) -> Row(k, v) }
+}
+
 @Composable
-fun TransferScreen(s: UiState, onSendMore: () -> Unit, onClose: () -> Unit) {
+fun TransferScreen(s: UiState, onSendMore: () -> Unit, onRetry: () -> Unit, onClose: () -> Unit) {
     val ctx = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     LaunchedEffect(s.phase) { if (s.phase == Phase.Done) haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
 
-    val sending = s.role == Role.Send
+    val all = remember(s.files) { rows(s.files) }
+    val incoming = all.filter { !it.outgoing }
+    val outgoing = all.filter { it.outgoing }
     val title = when (s.phase) {
-        Phase.Done -> when { s.bench -> "Speed test done"; s.connected -> "Connected"; sending -> "Sent"; else -> "Received" }
+        Phase.Done -> when { s.bench -> "Speed test done"; s.connected -> "Connected"; outgoing.isNotEmpty() && incoming.isEmpty() -> "Sent"; else -> "Received" }
         Phase.Failed -> if (s.error == "Cancelled") "Cancelled" else "Transfer failed"
-        Phase.Connecting, Phase.Preparing -> "Connecting"
-        else -> if (s.bench) "Testing speed" else if (sending) "Sending" else "Receiving"
+        Phase.Connecting, Phase.Preparing, Phase.Waiting -> "Connecting"
+        else -> when {
+            s.bench -> "Testing speed"
+            incoming.any { it.status != FStatus.Done } && outgoing.any { it.status != FStatus.Done } -> "Transferring"
+            incoming.any { it.status != FStatus.Done } -> "Receiving"
+            else -> "Sending"
+        }
     }
 
-    fun install(f: FileItem) {
-        val parts = if (f.group.isNotEmpty()) s.files.filter { it.group == f.group && it.status == FStatus.Done }.mapNotNull { it.uri }
-        else listOfNotNull(f.uri)
+    fun install(r: Row) {
+        val uris = r.parts.filter { it.status == FStatus.Done }.mapNotNull { it.uri }
         scope.launch {
-            val err = withContext(Dispatchers.IO) { runCatching { Installer.install(ctx, parts) }.exceptionOrNull() }
+            val err = withContext(Dispatchers.IO) { runCatching { Installer.install(ctx, uris) }.exceptionOrNull() }
             if (err != null) Toast.makeText(ctx, "Install failed: ${err.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -66,7 +97,6 @@ fun TransferScreen(s: UiState, onSendMore: () -> Unit, onClose: () -> Unit) {
         LazyColumn(
             Modifier.weight(1f),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
                 Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -78,98 +108,125 @@ fun TransferScreen(s: UiState, onSendMore: () -> Unit, onClose: () -> Unit) {
                     Spacer(Modifier.weight(1f))
                     s.link?.let { Chip(it, warn = s.freqMhz in 1..4999) }
                 }
+                s.peer?.let {
+                    Text(
+                        (if (s.connected) "with " else "") + it,
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
             }
 
-            item { SpeedCard(s) }
+            item { SpeedCard(s); Spacer(Modifier.height(12.dp)) }
 
             s.error?.takeIf { s.phase == Phase.Failed && it != "Cancelled" }?.let { err ->
                 item {
                     Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.errorContainer) {
                         Text(err, Modifier.fillMaxWidth().padding(14.dp), color = MaterialTheme.colorScheme.onErrorContainer)
                     }
+                    Spacer(Modifier.height(12.dp))
                 }
             }
-            s.tip?.let { item { TipCard(it) } }
+            s.tip?.let { item { TipCard(it); Spacer(Modifier.height(12.dp)) } }
 
-            if (!s.bench && s.files.isNotEmpty()) {
-                item {
-                    val n = s.files.count { it.status == FStatus.Done }
-                    SectionLabel("Files", Modifier.padding(top = 4.dp)) {
-                        Text("$n of ${s.files.size} done", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-                item {
-                    Panel(Modifier.fillMaxWidth(), padding = 0.dp) {
-                        Spacer(Modifier.height(4.dp))
-                        s.files.forEachIndexed { i, f ->
-                            ItemRow(f, sending, s.active || s.connected, onSkip = { Engine.skip(f.idx) }, onInstall = { install(f) })
-                            if (i < s.files.lastIndex) HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        }
-                        Spacer(Modifier.height(4.dp))
-                    }
-                }
-                if (!sending && s.files.any { it.status == FStatus.Done }) item {
-                    Text(
-                        "Saved in Downloads/HyperShare",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                    )
-                }
+            if (!s.bench) {
+                section("Receiving", incoming, s, sending = false, onInstall = ::install)
+                section("Sending", outgoing, s, sending = true, onInstall = ::install)
+            }
+            if (!s.bench && incoming.any { it.status == FStatus.Done }) item {
+                Text(
+                    "Saved in Downloads/HyperShare",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                )
             }
         }
 
         // Bottom actions
         Row(Modifier.fillMaxWidth().padding(20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            val canAdd = sending && s.connected && !s.bench
             val busy = s.phase == Phase.Transferring || s.phase == Phase.Connecting || s.phase == Phase.Preparing
-            if (canAdd) OutlinedButton(onSendMore, Modifier.weight(1f).height(52.dp)) {
+            if (s.connected && !s.bench) OutlinedButton(onSendMore, Modifier.weight(1f).height(52.dp)) {
                 Icon(Icons.Outlined.Add, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Send more")
             }
-            if (busy) OutlinedButton({ Engine.cancel() }, Modifier.weight(1f).height(52.dp)) { Text("Cancel") }
-            else Button(onClose, Modifier.weight(1f).height(52.dp)) { Text(if (s.connected) "Finish" else "Done") }
+            when {
+                busy -> OutlinedButton({ Engine.cancel() }, Modifier.weight(1f).height(52.dp)) { Text("Cancel") }
+                s.phase == Phase.Failed && s.canRetry -> {
+                    OutlinedButton(onClose, Modifier.weight(1f).height(52.dp)) { Text("Close") }
+                    Button(onRetry, Modifier.weight(1f).height(52.dp)) {
+                        Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Try again")
+                    }
+                }
+                else -> Button(onClose, Modifier.weight(1f).height(52.dp)) { Text(if (s.connected) "Finish" else "Done") }
+            }
         }
     }
 }
 
-@Composable
-private fun ItemRow(f: FileItem, sending: Boolean, live: Boolean, onSkip: () -> Unit, onInstall: () -> Unit) {
-    val ctx = LocalContext.current
-    val uri = f.uri
-    val pct = if (f.size > 0) f.done.toFloat() / f.size else 1f
-    val isApk = f.mime == APK_MIME || f.name.endsWith(".apk", true)
-    val pending = f.status == FStatus.Queued || f.status == FStatus.Active
-    val primary: RowAction? = when {
-        f.status != FStatus.Done || uri == null || sending -> null
-        isApk -> RowAction(Icons.Outlined.Add, "Install", onInstall)
-        f.mime.startsWith("video/") || f.mime.startsWith("audio/") -> RowAction(Icons.Outlined.Add, "Play") { openFile(ctx, uri, f.mime) }
-        else -> RowAction(Icons.Outlined.Add, "Open") { openFile(ctx, uri, f.mime) }
+private fun androidx.compose.foundation.lazy.LazyListScope.section(
+    title: String, list: List<Row>, s: UiState, sending: Boolean, onInstall: (Row) -> Unit,
+) {
+    if (list.isEmpty()) return
+    item(key = "h:$title") {
+        val n = list.count { it.status == FStatus.Done }
+        SectionLabel(title, Modifier.padding(top = 4.dp, bottom = 8.dp)) {
+            Text("$n of ${list.size} done", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
+    items(list, key = { it.key }) { r ->
+        val first = r == list.first(); val last = r == list.last()
+        val shape = RoundedCornerShape(
+            topStart = if (first) 16.dp else 0.dp, topEnd = if (first) 16.dp else 0.dp,
+            bottomStart = if (last) 16.dp else 0.dp, bottomEnd = if (last) 16.dp else 0.dp,
+        )
+        Surface(Modifier.fillMaxWidth().animateItem(), shape = shape, color = MaterialTheme.colorScheme.surface) {
+            Column {
+                if (first) Spacer(Modifier.height(4.dp))
+                ItemRow(r, sending, s.active || s.connected, onInstall)
+                if (!last) HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                else Spacer(Modifier.height(4.dp))
+            }
+        }
+    }
+    item(key = "s:$title") { Spacer(Modifier.height(14.dp)) }
+}
+
+@Composable
+private fun ItemRow(r: Row, sending: Boolean, live: Boolean, onInstall: (Row) -> Unit) {
+    val ctx = LocalContext.current
+    val f = r.first
+    val uri = f.uri
+    val pct = if (r.size > 0) r.done.toFloat() / r.size else 1f
+    val pending = r.status == FStatus.Queued || r.status == FStatus.Active
+    val done = r.status == FStatus.Done
+    val primary = if (!done || uri == null || sending) null else primaryAction(ctx, uri, f.mime, f.name) { onInstall(r) }
     val icons = when {
-        pending && live -> listOf(RowAction(Icons.Outlined.Close, "Cancel file", onSkip))
-        f.status == FStatus.Done && uri != null && !sending -> listOf(RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, f.mime) })
+        pending && live -> listOf(RowAction(Icons.Outlined.Close, "Cancel file") { r.parts.forEach { Engine.skip(it) } })
+        done && uri != null && !sending && r.parts.size == 1 -> listOf(RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, f.mime) })
         else -> emptyList()
     }
     FileRow(
-        name = f.name.substringAfterLast('/'),
+        name = r.label,
         mime = f.mime,
-        uri = if (f.status == FStatus.Done || sending) uri else null,
+        uri = if (done || sending) uri else null,
         pkg = f.group.ifEmpty { null },
         meta = buildString {
-            when (f.status) {
-                FStatus.Done -> append("${fmtBytes(f.size)} · ${extOf(f.name, f.mime)}")
-                FStatus.Active -> append("${fmtBytes(f.done)} of ${fmtBytes(f.size)}")
-                FStatus.Queued -> append("${fmtBytes(f.size)} · waiting")
+            when (r.status) {
+                FStatus.Done -> append("${fmtBytes(r.size)} · ${extOf(f.name, f.mime)}")
+                FStatus.Active -> append("${fmtBytes(r.done)} of ${fmtBytes(r.size)}")
+                FStatus.Queued -> append("${fmtBytes(r.size)} · waiting")
                 FStatus.Skipped -> append("Cancelled")
             }
-            if (f.name.contains('/') && f.status != FStatus.Skipped) append(" · ${f.name.substringBeforeLast('/')}")
+            if (r.parts.size > 1) append(" · ${r.parts.size} parts")
+            if (r.parts.any { it.resumed } && r.status != FStatus.Skipped) append(" · resumed")
+            if (f.name.contains('/') && r.status != FStatus.Skipped) append(" · ${f.name.substringBeforeLast('/')}")
         },
-        progress = if (f.status == FStatus.Active) pct else null,
-        trailing = if (f.status == FStatus.Active) "${(pct * 100).toInt()}%" else null,
-        done = f.status == FStatus.Done,
+        progress = if (r.status == FStatus.Active) pct else null,
+        trailing = if (r.status == FStatus.Active) "${(pct * 100).toInt()}%" else null,
+        done = done,
         primary = primary,
         actions = icons,
-        dim = f.status == FStatus.Skipped,
-        onClick = if (f.status == FStatus.Done && uri != null && !sending && !isApk) ({ openFile(ctx, uri, f.mime) }) else null,
+        dim = r.status == FStatus.Skipped,
+        onClick = if (done && uri != null && !sending && kindOf(f.mime, f.name) != Kind.Apps) ({ openFile(ctx, uri, f.mime) }) else null,
     )
 }
 

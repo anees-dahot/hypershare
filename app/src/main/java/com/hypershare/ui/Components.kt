@@ -351,3 +351,39 @@ fun SectionLabel(text: String, modifier: Modifier = Modifier, trailing: @Composa
         trailing?.invoke()
     }
 }
+
+// ------------------------------------------------------------------ shared bits for v0.5 screens
+
+/** Rough file kind, for filters and the right action button. */
+enum class Kind(val label: String) { All("All"), Photos("Photos"), Videos("Videos"), Music("Music"), Apps("Apps"), Docs("Docs"), Other("Other") }
+
+fun kindOf(mime: String, name: String): Kind = when {
+    mime.startsWith("image/") -> Kind.Photos
+    mime.startsWith("video/") -> Kind.Videos
+    mime.startsWith("audio/") -> Kind.Music
+    mime == com.hypershare.data.APK_MIME || name.endsWith(".apk", true) -> Kind.Apps
+    mime.startsWith("text/") || mime.contains("pdf") || mime.contains("document") || mime.contains("sheet") ||
+        mime.contains("presentation") || mime.contains("msword") -> Kind.Docs
+    else -> Kind.Other
+}
+
+/** "Install" for APKs, "Play" for media, "Open" otherwise. */
+fun primaryAction(ctx: Context, uri: Uri, mime: String, name: String, install: () -> Unit): RowAction = when (kindOf(mime, name)) {
+    Kind.Apps -> RowAction(Icons.Outlined.InstallMobile, "Install", install)
+    Kind.Videos, Kind.Music -> RowAction(Icons.Outlined.PlayArrow, "Play") { openFile(ctx, uri, mime) }
+    else -> RowAction(Icons.Outlined.OpenInNew, "Open") { openFile(ctx, uri, mime) }
+}
+
+/** Round initial for a phone name. */
+@Composable
+fun Avatar(name: String, size: Dp = 44.dp) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            name.trim().take(1).uppercase(Locale.getDefault()).ifEmpty { "?" },
+            style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary,
+        )
+    }
+}

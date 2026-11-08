@@ -39,7 +39,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.launch
 
-private enum class Screen { Home, Pick, Receive, Transfer }
+private enum class Screen { Welcome, Home, Inbox, Pick, Choose, Receive, Transfer }
 
 class MainActivity : ComponentActivity() {
     /** Picker selection; lives here so it survives screen switches. */
@@ -47,26 +47,72 @@ class MainActivity : ComponentActivity() {
     private val docs = mutableStateListOf<Entity>()
     private var picking by mutableStateOf(false)
     private var adding by mutableStateOf(false)
+    private var choosing by mutableStateOf(false)
+    private var inbox by mutableStateOf(false)
+    private var onboarded by mutableStateOf(true)
     private var pendingItems: List<Picked> = emptyList()
-    private var pendingBench = false
+    private var pendingBench by mutableStateOf(false)
 
-    private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
-
-    private val scanner = registerForActivityResult(ScanContract()) { r ->
-        r.contents?.let {
-            Engine.startSend(this, pendingItems, it, pendingBench)
-            picking = false
-            selected.clear()
-        }
+    // Ask for permissions right before the step that needs them, then carry on either way.
+    private var afterPerms: (() -> Unit)? = null
+    private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        afterPerms?.invoke(); afterPerms = null
     }
 
+    private fun withPerms(list: Array<String>, then: () -> Unit) {
+        val missing = list.filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
+        if (missing.isEmpty()) then() else { afterPerms = then; perms.launch(missing.toTypedArray()) }
+    }
+
+    /** Wi-Fi (+ notifications, + storage on Android 8–9) before any transfer. */
+    private fun transferPerms() = buildList {
+        addAll(wifiPerms())
+        if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT < 29) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    }.toTypedArray()
+
+    /**
+     * Android 8–12 (and hotspot joins on many phones) silently fail to find the other phone when
+     * Location is off. Check first and say so, instead of a long, mysterious wait.
+     */
+    private var locationPrompt by mutableStateOf<(() -> Unit)?>(null)
+
+    private fun locationOn(): Boolean {
+        val lm = getSystemService(android.location.LocationManager::class.java) ?: return true
+        return if (Build.VERSION.SDK_INT >= 28) lm.isLocationEnabled
+        else lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) || lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
+    }
+
+    private fun withLocation(hotspot: Boolean, then: () -> Unit) {
+        if ((Build.VERSION.SDK_INT < 33 || hotspot) && !locationOn()) locationPrompt = then else then()
+    }
+
+    private val scanner = registerForActivityResult(ScanContract()) { r ->
+        r.contents?.let { start(it, viaQr = true) }
+    }
+
+    private fun start(code: String, viaQr: Boolean) {
+        val hotspot = code.split('|').getOrNull(1) == "H"
+        withPerms(transferPerms()) { withLocation(hotspot) {
+            Engine.startSend(this, pendingItems, code, pendingBench, viaQr)
+            picking = false; choosing = false
+            selected.clear()
+        } }
+    }
+
+    private fun receive() = withPerms(transferPerms()) {
+        withLocation(Prefs.link(this) == Prefs.LINK_HOTSPOT) { Engine.startReceive(this) }
+    }
+
+    /** Picker "Send"/"Add": add to the open session, or go choose a receiver. */
     private fun sendSelected() {
         val items = selected.values.flatMap { it.parts }
         if (adding) {
             Engine.addFiles(items)
             selected.clear(); picking = false; adding = false
         } else {
-            pendingItems = items; pendingBench = false; scan()
+            pendingItems = items; pendingBench = false
+            withPerms(wifiPerms()) { picking = false; choosing = true }
         }
     }
 
@@ -75,15 +121,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         History.load(this)
         Prefs.load(this)
-        perms.launch(buildList {
-            add(Manifest.permission.CAMERA)
-            if (Build.VERSION.SDK_INT >= 33) {
-                add(Manifest.permission.NEARBY_WIFI_DEVICES)
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            } else { add(Manifest.permission.ACCESS_FINE_LOCATION); add(Manifest.permission.ACCESS_COARSE_LOCATION) }
-            if (Build.VERSION.SDK_INT < 29) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        }.toTypedArray())
+        onboarded = Prefs.onboarded(this)
         lifecycleScope.launch { Updater.check() }
+        handleShare(intent)
         if (BuildConfig.DEBUG) debugHook(intent)
 
         setContent {
@@ -98,14 +138,18 @@ class MainActivity : ComponentActivity() {
         val s by Engine.state.collectAsStateWithLifecycle()
         val history by History.items.collectAsStateWithLifecycle()
         val update by Updater.ui.collectAsStateWithLifecycle()
+        val name by Prefs.nameFlow.collectAsStateWithLifecycle()
         var settings by remember { mutableStateOf(false) }
         var crash by remember { mutableStateOf(com.hypershare.CrashLog.read()) }
 
         val screen = when {
+            !onboarded -> Screen.Welcome
             picking -> Screen.Pick
-            s.phase == Phase.Idle -> Screen.Home
-            s.role == Role.Receive && (s.phase == Phase.Preparing || s.phase == Phase.Waiting) -> Screen.Receive
-            else -> Screen.Transfer
+            s.phase != Phase.Idle && s.role == Role.Receive && (s.phase == Phase.Preparing || s.phase == Phase.Waiting) -> Screen.Receive
+            s.phase != Phase.Idle -> Screen.Transfer
+            choosing -> Screen.Choose
+            inbox -> Screen.Inbox
+            else -> Screen.Home
         }
 
         // Screen off throttles Wi-Fi; keep it on while anything is in flight.
@@ -114,12 +158,14 @@ class MainActivity : ComponentActivity() {
             else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
 
-        BackHandler(screen != Screen.Home) {
+        BackHandler(screen != Screen.Home && screen != Screen.Welcome) {
             when (screen) {
                 Screen.Pick -> { picking = false; adding = false }
+                Screen.Choose -> { choosing = false; if (!pendingBench) picking = true }
+                Screen.Inbox -> inbox = false
                 Screen.Receive -> Engine.reset()
-                Screen.Transfer -> if (s.active) moveTaskToBack(true) else Engine.reset()
-                Screen.Home -> Unit
+                Screen.Transfer -> if (s.active || s.connected) moveTaskToBack(true) else Engine.reset()
+                else -> Unit
             }
         }
 
@@ -133,40 +179,93 @@ class MainActivity : ComponentActivity() {
             },
         ) { sc ->
             when (sc) {
+                Screen.Welcome -> WelcomeScreen { onboarded = true; Prefs.load(this@MainActivity) }
                 Screen.Home -> HomeScreen(
-                    history, update,
+                    history, update, name,
                     onSend = { adding = false; picking = true },
-                    onReceive = { Engine.startReceive(this@MainActivity) },
-                    onBench = { pendingBench = true; scan() },
+                    onReceive = { receive() },
+                    onBench = { pendingItems = emptyList(); pendingBench = true; withPerms(wifiPerms()) { choosing = true } },
+                    onInbox = { inbox = true },
                     onSettings = { settings = true },
                 )
+                Screen.Inbox -> InboxScreen(onBack = { inbox = false })
                 Screen.Pick -> PickScreen(
                     selected, docs, adding,
                     onBack = { picking = false; adding = false },
                     onSend = { sendSelected() },
                 )
-                Screen.Receive -> ReceiveScreen(s, onBack = { Engine.reset() })
+                Screen.Choose -> ChooseScreen(
+                    count = selected.size.takeIf { it > 0 } ?: pendingItems.size,
+                    bytes = pendingItems.sumOf { it.size },
+                    bench = pendingBench,
+                    onPeer = { p -> start(p.invite, viaQr = false) },
+                    onScan = { scan() },
+                    onBack = { choosing = false; if (!pendingBench) picking = true },
+                )
+                Screen.Receive -> ReceiveScreen(s, onBack = { Engine.reset() }, onBand = { only24 ->
+                    Prefs.setOnly24(this@MainActivity, only24); Engine.reset(); receive()
+                })
                 Screen.Transfer -> TransferScreen(
                     s,
                     onSendMore = { adding = true; selected.clear(); picking = true },
+                    onRetry = {
+                        // Same files again; the receiver continues partly received ones.
+                        pendingItems = Engine.retryItems(); pendingBench = false
+                        Engine.reset(); choosing = true
+                    },
                     onClose = { Engine.reset() },
                 )
             }
         }
 
         if (settings) SettingsSheet(onDismiss = { settings = false })
+        locationPrompt?.let { then ->
+            AlertDialog(
+                onDismissRequest = { locationPrompt = null },
+                title = { Text("Turn on Location") },
+                text = { Text("Android needs Location switched on to find the other phone over Wi-Fi. HyperShare doesn't read or store your location.") },
+                confirmButton = {
+                    Button({
+                        locationPrompt = null
+                        runCatching { startActivity(android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+                    }) { Text("Open settings") }
+                },
+                dismissButton = { TextButton({ locationPrompt = null; then() }) { Text("Try anyway") } },
+            )
+        }
         crash?.let { report -> CrashDialog(report) { com.hypershare.CrashLog.clear(); crash = null } }
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        handleShare(intent)
         if (BuildConfig.DEBUG) debugHook(intent)
+    }
+
+    /** "Share → HyperShare" from any app: jump straight to choosing a receiver. */
+    private fun handleShare(i: android.content.Intent?) {
+        if (i == null || (i.action != android.content.Intent.ACTION_SEND && i.action != android.content.Intent.ACTION_SEND_MULTIPLE)) return
+        @Suppress("DEPRECATION")
+        val uris: List<android.net.Uri> = when (i.action) {
+            android.content.Intent.ACTION_SEND -> listOfNotNull(i.getParcelableExtra(android.content.Intent.EXTRA_STREAM))
+            else -> i.getParcelableArrayListExtra<android.net.Uri>(android.content.Intent.EXTRA_STREAM).orEmpty()
+        }
+        if (uris.isEmpty()) return
+        i.action = null // handle once
+        lifecycleScope.launch {
+            val ents = MediaRepo.documents(this@MainActivity, uris)
+            if (Engine.state.value.connected) { Engine.addFiles(ents.flatMap { it.parts }); return@launch }
+            selected.clear(); ents.forEach { selected[it.key] = it }
+            pendingItems = ents.flatMap { it.parts }; pendingBench = false
+            picking = false; inbox = false
+            withPerms(wifiPerms()) { choosing = true }
+        }
     }
 
     /**
      * Debug builds only: drive a transfer over the existing network without Wi-Fi Direct, for emulator tests.
      *   am start -n com.hypershare/.ui.MainActivity --ez debug_receive_lan true
-     *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX3|L|-|-|0|0|10.0.2.2' [--ez debug_bench true]
+     *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX4|L|-|-|0|0|10.0.2.2|Emu' [--ez debug_bench true]
      */
     private fun debugHook(i: android.content.Intent) {
         if (i.getBooleanExtra("debug_fgs_race", false)) {
@@ -182,7 +281,7 @@ class MainActivity : ComponentActivity() {
             val items = if (bench) emptyList() else
                 (MediaRepo.media(this@MainActivity, MediaKind.Photos) + MediaRepo.media(this@MainActivity, MediaKind.Videos)).flatMap { it.parts }
             picking = false
-            Engine.startSend(this@MainActivity, items, qr, bench)
+            Engine.startSend(this@MainActivity, items, qr, bench, viaQr = !i.getBooleanExtra("debug_nearby", false))
         }
     }
 
@@ -208,6 +307,15 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
         Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             Text("Settings", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(20.dp))
+
+            var devName by remember { mutableStateOf(Prefs.deviceName(ctx)) }
+            Text("This phone's name", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                devName, { devName = it.take(30); Prefs.setDeviceName(ctx, devName) }, Modifier.fillMaxWidth(), singleLine = true,
+                supportingText = { Text("Shown to the other phone and in its Nearby list.") },
+            )
+            Spacer(Modifier.height(16.dp))
 
             Text("Connection", style = MaterialTheme.typography.titleMedium)
             Text(

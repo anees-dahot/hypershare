@@ -19,7 +19,7 @@ import java.nio.channels.SocketChannel
 object Proto {
     const val DATA_PORT = 8988
     const val CTRL_PORT = 8989
-    const val MAGIC = 0x48535833 // "HSX3"
+    const val MAGIC = 0x48535834 // "HSX4"
     const val CHUNK = 4 * 1024 * 1024
     /** Chunk header: fileIdx Int, offset Long, len Int, crc Int. fileIdx -1 = end of stream. */
     const val HDR = 20
@@ -27,11 +27,13 @@ object Proto {
     const val BENCH_SIZE = 2L * 1024 * 1024 * 1024
 
     // Control messages (either direction unless noted), framed as type byte + payload.
-    const val T_ADD = 1        // S->R: count, then (name, size, mime, group) each
-    const val T_ADDED = 2      // R->S: new file count
-    const val T_FILE_DONE = 3  // R->S: idx fully written
-    const val T_SKIP = 4       // idx cancelled by either side
+    // Both phones can send; indexes are per direction (the sender's outgoing list).
+    const val T_ADD = 1        // count, then (name, size, mime, group) each
+    const val T_ADDED = 2      // reply: count, then per file the chunk indexes already received (resume)
+    const val T_FILE_DONE = 3  // receiver -> sender: idx fully written
+    const val T_SKIP_MINE = 4  // "I cancelled my outgoing file idx"
     const val T_BYE = 5        // session over
+    const val T_SKIP_YOURS = 6 // "stop sending me your file idx"
 
     fun benchItem() = Picked(Uri.EMPTY, BENCH_NAME, BENCH_SIZE, "application/octet-stream")
 }
@@ -105,6 +107,16 @@ class Sink private constructor(
     @Volatile private var finished = false
     @Volatile private var aborted = false
 
+    /** Where the partial file lives (content URI or path), for resuming later. */
+    val locator: String? get() = uri?.toString() ?: file?.path
+
+    /** Close without finishing: keeps the partial file for a later resume. */
+    @Synchronized fun closeKeep() {
+        if (finished || aborted) return
+        aborted = true // no more writes in this session
+        runCatching { ch?.close(); pfd?.close() }
+    }
+
     /** Content URI once the file is complete and visible to other apps. */
     val readyUri: Uri? get() = if (!finished) null else uri ?: file?.let {
         androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", it)
@@ -154,6 +166,19 @@ class Sink private constructor(
             return Sink(ctx, uri, pfd, FileOutputStream(pfd.fileDescriptor).channel)
         }
     
+        /** Reopen a partial file kept by [closeKeep]; null if it's gone. */
+        fun reopen(ctx: Context, locator: String): Sink? = runCatching {
+            if (locator.startsWith("content://")) {
+                val uri = Uri.parse(locator)
+                val pfd = ctx.contentResolver.openFileDescriptor(uri, "rw") ?: return null
+                Sink(ctx, uri, pfd, FileOutputStream(pfd.fileDescriptor).channel)
+            } else {
+                val f = java.io.File(locator)
+                if (!f.exists()) return null
+                Sink(ctx, null, null, java.io.RandomAccessFile(f, "rw").channel, f)
+            }
+        }.getOrNull()
+
         @Suppress("DEPRECATION")
         private fun openLegacy(ctx: Context, name: String, dirs: String): Sink {
             val root = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "HyperShare")

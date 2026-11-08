@@ -37,9 +37,11 @@ import androidx.compose.material.icons.outlined.FileOpen
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.MusicNote
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,11 +63,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private val TABS = listOf("Apps", "Photos", "Videos", "Music", "Files")
-
-private fun mediaPerms() =
-    if (Build.VERSION.SDK_INT >= 33) arrayOf(
-        Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO,
-    ) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
 
 /**
  * Built-in chooser: apps, photos, videos, music, plus files/folders via the system picker.
@@ -130,10 +127,10 @@ fun PickScreen(
         }
         HorizontalPager(pager, Modifier.weight(1f), beyondViewportPageCount = 1) { page ->
             when (page) {
-                0 -> AppsGrid(apps, selected, ::toggle)
-                1 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else MediaGrid(photos, selected, 3, ::toggle)
-                2 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else MediaGrid(videos, selected, 3, ::toggle)
-                3 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else MusicList(music, selected, ::toggle)
+                0 -> AppsTab(apps, selected, ::toggle)
+                1 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(photos, selected) { MediaGrid(it, selected, 3, ::toggle) }
+                2 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(videos, selected) { MediaGrid(it, selected, 3, ::toggle) }
+                3 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(music, selected) { MusicList(it, selected, ::toggle) }
                 else -> FilesTab(docs, selected, ::toggle, onFiles = { filePicker.launch(arrayOf("*/*")) }, onFolder = { folderPicker.launch(null) })
             }
         }
@@ -225,10 +222,60 @@ private fun CheckMark(on: Boolean, onDark: Boolean) {
     ) { if (on) Icon(Icons.Rounded.Check, null, Modifier.size(15.dp), tint = c.onPrimary) }
 }
 
+private enum class Sort(val label: String) { Newest("Newest"), Oldest("Oldest"), Largest("Largest"), Name("Name") }
+
+/** Count, sort menu and Select all above a media tab. */
+@Composable
+private fun Tools(list: List<Entity>?, selected: SnapshotStateMap<String, Entity>, content: @Composable (List<Entity>?) -> Unit) {
+    var sort by rememberSaveable { mutableStateOf(Sort.Newest) }
+    var menu by remember { mutableStateOf(false) }
+    val sorted = remember(list, sort) {
+        list?.let {
+            when (sort) {
+                Sort.Newest -> it
+                Sort.Oldest -> it.reversed()
+                Sort.Largest -> it.sortedByDescending { e -> e.size }
+                Sort.Name -> it.sortedBy { e -> e.label.lowercase() }
+            }
+        }
+    }
+    Column {
+        if (!list.isNullOrEmpty()) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${list.size} items", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            Box {
+                TextButton({ menu = true }) { Text(sort.label) }
+                DropdownMenu(menu, { menu = false }) {
+                    Sort.entries.forEach { o -> DropdownMenuItem(text = { Text(o.label) }, onClick = { sort = o; menu = false }) }
+                }
+            }
+            val allOn = list.all { selected.containsKey(it.key) }
+            TextButton({ if (allOn) list.forEach { selected.remove(it.key) } else list.forEach { selected[it.key] = it } }) {
+                Text(if (allOn) "Clear" else "Select all")
+            }
+        }
+        Box(Modifier.weight(1f)) { content(sorted) }
+    }
+}
+
+@Composable
+private fun AppsTab(apps: List<Entity>?, selected: Map<String, Entity>, toggle: (Entity) -> Unit) {
+    var q by rememberSaveable { mutableStateOf("") }
+    val shown = remember(apps, q) { apps?.filter { q.isBlank() || it.label.contains(q.trim(), ignoreCase = true) } }
+    Column {
+        if (!apps.isNullOrEmpty()) OutlinedTextField(
+            q, { q = it }, Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp), singleLine = true,
+            placeholder = { Text("Search ${apps.size} apps") },
+            leadingIcon = { Icon(Icons.Outlined.Search, null) },
+            shape = RoundedCornerShape(14.dp),
+        )
+        Box(Modifier.weight(1f)) { AppsGrid(shown, selected, toggle) }
+    }
+}
+
 @Composable
 private fun AppsGrid(apps: List<Entity>?, selected: Map<String, Entity>, toggle: (Entity) -> Unit) {
     if (apps == null) return Loading()
-    if (apps.isEmpty()) return Empty("No apps to share.")
+    if (apps.isEmpty()) return Empty("No matching apps.")
     LazyVerticalGrid(GridCells.Fixed(4), Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
         items(apps, key = { it.key }) { e ->
             val on = selected.containsKey(e.key)

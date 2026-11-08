@@ -42,25 +42,23 @@ The app shows the link frequency it got, along with live and average MB/s.
 
 ## Features
 
-- **Built-in picker:** tabs for Apps, Photos, Videos, Music and Files.
-  - **Apps:** sends the APK, including split APKs.
-  - **Files:** use the system picker, or send a whole folder; the receiver keeps its sub-folders.
-- **One open session:** after the first batch, the sender can tap **Send more** without pairing again. **Finish** ends the session on both phones.
-- **Per-file control:** either phone can cancel a single file while it's waiting or in progress.
-- **Actions by file type** when a file arrives:
-  - **Install** for APKs, including split APKs.
-  - **Play** for video and audio.
-  - **Open** for everything else.
-  - **Share** for any file.
-- **Live stats:** a compact speed card with a chart, average, peak and time remaining.
-- **Two connection types** (Settings, chosen on the receiver):
-  - **Wi-Fi Direct** (default).
-  - **Hotspot:** a local-only hotspot. Many phones run it on a wider 5 GHz channel, so it can be faster on the same pair of phones. The sender confirms joining once.
-- **In-app updates** from GitHub Releases, **dark mode**, and a **Recent** list.
+- **Two ways to pair:** tap the other phone's name in the **Nearby** list (it asks the receiver to accept), or scan its QR code.
+- **Both phones can send** in one session; each side sees the other's name.
+- **Built-in picker:** Apps (including split APKs), Photos, Videos, Music, Files and whole folders. Search, sort and Select all.
+- **Share → HyperShare** from any app.
+- **Received files screen:** search, filter by type, then open, install, share or delete.
+- **Per-file control:** cancel any file. Install for APKs, Play for media, Open for the rest.
+- **Resume:** if a transfer breaks, **Try again** continues partly received files instead of restarting them.
+- **Progress notification** with a Cancel button, plus a summary when done.
+- **First-run setup:** set this phone's name; each permission is explained.
+- **Connection types** (set in Settings): Wi-Fi Direct (default) or Hotspot. **Use 2.4 GHz** mode for older 2.4 GHz-only phones.
+- **In-app updates** from GitHub Releases, **dark mode**, and **crash reports** you can copy and send.
 
 ## How it's fast
 
 - **No discovery step:** the QR code carries the Wi-Fi Direct group name and password, so the sender joins directly instead of scanning for peers.
+- **Channel choice:** the Wi-Fi Direct group shares the router's channel when that channel allows it (not a DFS radar channel), otherwise channel 149, then 36.
+- **Fast join:** the sender stops scans and stale connects first, joins on the receiver's exact channel, waits for Android's "link up" signal and dials straight away. A stalled join is cancelled and retried, up to 3 times, instead of waiting it out.
 - **One channel only:** if the receiver is already on a 5 GHz Wi-Fi network, the Wi-Fi Direct group is created on that same channel. Otherwise the phone's single radio would keep hopping between two channels, which halves the speed and makes it jumpy. If that channel isn't available, it falls back to any 5 GHz channel, then to automatic.
 - **Warns about channel hopping:** if either phone is on a Wi-Fi network on a different channel, the app says so and explains how to fix it.
 - **4 parallel TCP streams:** files are split into 4 MB chunks, and each stream pulls the next free chunk.
