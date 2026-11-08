@@ -16,8 +16,8 @@ android {
         // Android 8+. Android 10+ APIs are guarded with legacy fallbacks (see p2p/Legacy.kt, Io.kt).
         minSdk = 26
         targetSdk = 36
-        versionCode = 500
-        versionName = "0.5.0"
+        versionCode = 501
+        versionName = "0.5.1"
     }
 
     // Release key lives outside the repo (~/.hypershare/keystore.properties).
