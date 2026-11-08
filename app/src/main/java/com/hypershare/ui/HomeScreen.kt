@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
@@ -55,15 +56,23 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("HyperShare", style = MaterialTheme.typography.headlineSmall)
-                    Text(
-                        "This phone: $name",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Text("HyperShare", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+                    Spacer(Modifier.height(2.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.tertiary))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Visible as $name",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-                IconButton(onSettings) { Icon(Icons.Outlined.Settings, "Settings") }
+                FilledTonalIconButton(onSettings, colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Icon(Icons.Outlined.Settings, "Settings")
+                }
             }
         }
 
@@ -83,7 +92,7 @@ fun HomeScreen(
         item {
             Panel(Modifier.fillMaxWidth(), padding = 0.dp) {
                 LinkRow(Icons.Outlined.Inventory2, "Received files", "Search, open, install, share", onInbox)
-                HorizontalDivider(Modifier.padding(start = 56.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 LinkRow(Icons.Outlined.Speed, "Test link speed", "2 GB of test data, nothing saved", onBench)
             }
         }
@@ -95,13 +104,8 @@ fun HomeScreen(
         }
         if (history.isEmpty()) {
             item {
-                Panel(Modifier.fillMaxWidth(), padding = 20.dp) {
-                    Text("No transfers yet", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Files you send or receive will show up here.",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Panel(Modifier.fillMaxWidth(), padding = 8.dp) {
+                    EmptyState(Icons.Outlined.History, "No transfers yet", "Files you send or receive will show up here.")
                 }
             }
         } else {
@@ -131,9 +135,12 @@ fun HomeScreen(
 @Composable
 private fun LinkRow(icon: ImageVector, title: String, sub: String, onClick: () -> Unit) {
     Surface(onClick = onClick, color = Color.Transparent) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(16.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) { Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) }
+            Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleMedium)
                 Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -147,22 +154,27 @@ private fun LinkRow(icon: ImageVector, title: String, sub: String, onClick: () -
 private fun ActionTile(icon: ImageVector, title: String, sub: String, filled: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val c = MaterialTheme.colorScheme
     val src = remember { MutableInteractionSource() }
-    val fg = if (filled) c.onPrimary else c.onSurface
+    val fg = if (filled) Color.White else c.onSurface
     Surface(
         onClick = onClick, interactionSource = src,
         modifier = modifier.pressable(src),
-        shape = RoundedCornerShape(22.dp),
-        color = if (filled) c.primary else c.surface,
+        shape = MaterialTheme.shapes.extraLarge,
+        color = if (filled) Color.Transparent else c.surface,
         border = if (filled) null else BorderStroke(1.dp, c.outlineVariant),
+        shadowElevation = if (filled) 6.dp else 0.dp,
     ) {
-        Column(Modifier.padding(18.dp).heightIn(min = 120.dp), verticalArrangement = Arrangement.SpaceBetween) {
+        Column(
+            Modifier.fillMaxWidth().then(if (filled) Modifier.background(BrandGradient) else Modifier).padding(20.dp).heightIn(min = 136.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+        ) {
             Box(
-                Modifier.size(44.dp).clip(RoundedCornerShape(13.dp))
+                Modifier.size(48.dp).clip(RoundedCornerShape(15.dp))
                     .background(if (filled) Color.White.copy(alpha = 0.16f) else c.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) { Icon(icon, null, tint = if (filled) fg else c.primary) }
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(22.dp))
             Text(title, style = MaterialTheme.typography.titleLarge, color = fg)
+            Spacer(Modifier.height(2.dp))
             Text(sub, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = if (filled) 0.82f else 0.62f))
         }
     }

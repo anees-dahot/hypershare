@@ -387,3 +387,24 @@ fun Avatar(name: String, size: Dp = 44.dp) {
         )
     }
 }
+
+/** Centered icon + title + body, used for every empty list. */
+@Composable
+fun EmptyState(icon: ImageVector, title: String, body: String? = null, modifier: Modifier = Modifier, action: @Composable (() -> Unit)? = null) {
+    Column(modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary) }
+        Spacer(Modifier.height(16.dp))
+        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        if (body != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
+        if (action != null) { Spacer(Modifier.height(16.dp)); action() }
+    }
+}

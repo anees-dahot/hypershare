@@ -4,15 +4,18 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.hypershare.p2p.Nearby
@@ -56,12 +59,15 @@ fun ChooseScreen(
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (peers.isEmpty()) item {
                 Panel(Modifier.fillMaxWidth(), padding = 20.dp) {
-                    Text("Looking for phones…", style = MaterialTheme.typography.titleMedium)
+                    Radar(Modifier.align(Alignment.CenterHorizontally).padding(vertical = 8.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("Looking for phones…", style = MaterialTheme.typography.titleMedium, modifier = Modifier.align(Alignment.CenterHorizontally))
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "On the other phone, open HyperShare and tap Receive. It appears here within a few seconds. " +
                             "If it doesn't (for example in Hotspot mode), scan its code instead.",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     )
                 }
             }
@@ -74,7 +80,7 @@ fun ChooseScreen(
                         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     ) {
                         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Avatar(p.name)
+                            Avatar(p.name, 48.dp)
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(p.name, style = MaterialTheme.typography.titleMedium)
@@ -83,7 +89,9 @@ fun ChooseScreen(
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            Text("Send", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                            Button({ onPeer(p) }, Modifier.height(36.dp), contentPadding = PaddingValues(horizontal = 18.dp)) {
+                                Text(if (bench) "Test" else "Send")
+                            }
                         }
                     }
                 }
@@ -94,5 +102,26 @@ fun ChooseScreen(
             Icon(Icons.Outlined.QrCodeScanner, null); Spacer(Modifier.width(10.dp))
             Text("Scan a code instead", style = MaterialTheme.typography.titleMedium)
         }
+    }
+}
+
+/** Expanding rings around a phone icon while discovery runs. */
+@Composable
+private fun Radar(modifier: Modifier = Modifier) {
+    val c = MaterialTheme.colorScheme.primary
+    val t = rememberInfiniteTransition(label = "radar")
+    val p by t.animateFloat(0f, 1f, infiniteRepeatable(tween(2200, easing = LinearEasing)), label = "p")
+    Box(modifier.size(120.dp), contentAlignment = Alignment.Center) {
+        androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
+            for (i in 0 until 3) {
+                val f = (p + i / 3f) % 1f
+                drawCircle(c.copy(alpha = (1f - f) * 0.35f), radius = size.minDimension / 2f * (0.3f + 0.7f * f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
+            }
+        }
+        Box(
+            Modifier.size(44.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(50)).background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Outlined.PhoneAndroid, null, tint = c) }
     }
 }

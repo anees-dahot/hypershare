@@ -66,9 +66,9 @@ fun WelcomeScreen(onDone: () -> Unit) {
     ) {
         Spacer(Modifier.height(32.dp))
         Box(
-            Modifier.size(64.dp).clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.primary),
+            Modifier.size(72.dp).clip(RoundedCornerShape(22.dp)).background(BrandGradient),
             contentAlignment = Alignment.Center,
-        ) { Text("H", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onPrimary) }
+        ) { Text("H", style = MaterialTheme.typography.headlineLarge, color = androidx.compose.ui.graphics.Color.White) }
         Spacer(Modifier.height(20.dp))
         Text("Welcome to HyperShare", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(6.dp))
@@ -87,14 +87,21 @@ fun WelcomeScreen(onDone: () -> Unit) {
         )
 
         Spacer(Modifier.height(20.dp))
-        SectionLabel("Permissions")
+        val allowed = remember(tick) { needs.count { granted(it.perms) } }
+        SectionLabel("Permissions") {
+            Chip("$allowed of ${needs.size} allowed")
+        }
         Spacer(Modifier.height(8.dp))
         Panel(Modifier.fillMaxWidth(), padding = 4.dp) {
-            needs.forEach { n ->
+            needs.forEachIndexed { i, n ->
+                if (i > 0) HorizontalDivider(Modifier.padding(start = 66.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 key(tick) {
                     val ok = granted(n.perms)
                     Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(n.icon, null, tint = MaterialTheme.colorScheme.primary)
+                        Box(
+                            Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(n.icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) }
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
                             Text(n.title, style = MaterialTheme.typography.titleMedium)
@@ -102,7 +109,7 @@ fun WelcomeScreen(onDone: () -> Unit) {
                         }
                         Spacer(Modifier.width(8.dp))
                         AnimatedContent(ok, label = "perm") { on ->
-                            if (on) Icon(Icons.Rounded.Check, "Allowed", tint = MaterialTheme.colorScheme.primary)
+                            if (on) DoneBadge(26.dp)
                             else FilledTonalButton({ ask.launch(n.perms) }, contentPadding = PaddingValues(horizontal = 14.dp)) { Text("Allow") }
                         }
                     }

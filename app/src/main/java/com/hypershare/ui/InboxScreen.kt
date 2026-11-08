@@ -9,7 +9,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -63,11 +65,11 @@ fun InboxScreen(onBack: () -> Unit) {
         }
         when {
             all == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp) }
-            shown.isEmpty() -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    if (all!!.isEmpty()) "Nothing received yet.\nFiles you receive are saved in Downloads/HyperShare." else "No files match.",
-                    textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            shown.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (all!!.isEmpty()) EmptyState(
+                    Icons.Outlined.Inbox, "Nothing received yet",
+                    "Files you receive are saved in Downloads/HyperShare.",
+                ) else EmptyState(Icons.Outlined.SearchOff, "No files match", "Try another search or filter.")
             }
             else -> LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
                 item {
