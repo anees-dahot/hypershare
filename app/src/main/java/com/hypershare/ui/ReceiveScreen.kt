@@ -81,6 +81,14 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
                     }
                 }
             }
+            s.code?.let { c ->
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Code  " + c.chunked(3).joinToString(" "),
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                )
+            }
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 PulseDot()
@@ -105,7 +113,11 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
         Panel(Modifier.fillMaxWidth()) {
             Step(1, "Open HyperShare and tap Send")
             Step(2, "Pick the files")
-            Step(3, if (s.discoverable) "Tap \"$me\" in the Nearby list, or scan this code" else "Scan this code")
+            Step(3, when {
+                s.discoverable && s.code != null -> "Tap \"$me\" in the Nearby list, scan this QR, or tap Enter code and type ${s.code}"
+                s.discoverable -> "Tap \"$me\" in the Nearby list, or scan this code"
+                else -> "Scan this code"
+            })
         }
 
         s.tip?.let {

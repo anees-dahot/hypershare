@@ -9,11 +9,10 @@ import com.hypershare.data.Partial
 import com.hypershare.data.Partials
 import com.hypershare.data.Picked
 import com.hypershare.data.Prefs
-import com.hypershare.p2p.HotspotClient
-import com.hypershare.p2p.HotspotHost
 import com.hypershare.p2p.Invite
 import com.hypershare.p2p.P2p
 import com.hypershare.p2p.groupFreq
+import com.hypershare.p2p.codeOf
 import com.hypershare.p2p.staFreq
 import com.hypershare.service.TransferService
 import kotlinx.coroutines.*
@@ -72,6 +71,8 @@ data class UiState(
     val connected: Boolean = false,
     val error: String? = null,
     val qr: String? = null,
+    /** Receiver: 6-character code the sender can type instead of scanning. */
+    val code: String? = null,
     /** "Wi-Fi Direct · 5 GHz ch 149" etc. */
     val link: String? = null,
     val freqMhz: Int = 0,
@@ -210,9 +211,12 @@ private class Session(val ctx: Context, val role: Role, val bench: Boolean, val 
         if (tell) runCatching { msg(Proto.T_SKIP_YOURS) { writeInt(idx) } }
     }
 
+    /** Two streams can deliver a file's last chunks at once: only one may finish it. */
     fun finishIn(t: Track) {
-        if (t.done) return
-        t.openSink().finish(); t.done = true // openSink: empty files still get created
+        synchronized(t) {
+            if (t.done) return
+            t.openSink().finish(); t.done = true // openSink: empty files still get created
+        }
         runCatching { msg(Proto.T_FILE_DONE) { writeInt(t.idx) } }
     }
 }
@@ -312,7 +316,7 @@ object Engine {
                 if (s.ending) finalState(s)
                 else set(g) {
                     it.copy(
-                        phase = Phase.Failed, qr = null, connected = false, mbps = 0.0, error = friendly(e),
+                        phase = Phase.Failed, qr = null, code = null, connected = false, mbps = 0.0, error = friendly(e),
                         files = items(s), request = null, discoverable = false,
                         canRetry = role == Role.Send && s.outs.any { t -> !t.done && !t.skipped && t.pick != null },
                     )
@@ -339,7 +343,7 @@ object Engine {
             it.copy(
                 phase = when { s.cancelled -> Phase.Failed; left -> Phase.Failed; else -> Phase.Done },
                 error = when { s.cancelled -> "Cancelled"; left -> "The other phone stopped the transfer."; else -> null },
-                connected = false, qr = null, mbps = 0.0, etaSec = 0, files = items(s), request = null, discoverable = false,
+                connected = false, qr = null, code = null, mbps = 0.0, etaSec = 0, files = items(s), request = null, discoverable = false,
                 canRetry = !s.cancelled && s.role == Role.Send && s.outs.any { t -> !t.done && !t.skipped && t.pick != null },
             )
         }
@@ -360,7 +364,7 @@ object Engine {
     }
 
     private fun linkLabel(type: Char, freq: Int) =
-        (when (type) { Invite.HOTSPOT -> "Hotspot"; Invite.LAN -> "LAN (debug)"; else -> "Wi-Fi Direct" }) +
+        (if (type == Invite.LAN) "LAN (debug)" else "Wi-Fi Direct") +
             when { freq <= 0 -> ""; freq < 5000 -> " · 2.4 GHz"; else -> " · 5 GHz ch ${(freq - 5000) / 5}" }
 
     // ---------------------------------------------------------------- receiver (shows the code)
@@ -374,8 +378,7 @@ object Engine {
 
         var p2p: P2p? = null
         val inv: Invite = when {
-            lan -> Invite(Invite.LAN, "-", "-", 0, false, listOf("10.0.2.2"), me)
-            Prefs.link(ctx) == Prefs.LINK_HOTSPOT -> s.keep(HotspotHost(ctx)).start(me)
+            lan -> Invite(Invite.LAN, "-", "-", 0, listOf("10.0.2.2"), me, "debug")
             else -> {
                 val p = s.keep(P2p(ctx)).also { p2p = it }
                 val sta = staFreq(ctx)
@@ -385,7 +388,7 @@ object Engine {
             }
         }
         set(s.gen) {
-            it.copy(phase = Phase.Waiting, qr = inv.encode(), freqMhz = inv.freq, link = linkLabel(inv.type, inv.freq), discoverable = p2p != null)
+            it.copy(phase = Phase.Waiting, qr = inv.encode(), code = codeOf(inv.ssid), freqMhz = inv.freq, link = linkLabel(inv.type, inv.freq), discoverable = p2p != null)
         }
         // Let nearby phones find us without scanning (Wi-Fi Direct only).
         val advert = p2p?.let { p -> launch { runCatching { p.advertise(inv) } } }
@@ -397,7 +400,8 @@ object Engine {
             if (din.readInt() != Proto.MAGIC) throw IOException("The other phone runs a different HyperShare version. Update both.")
             val streams = din.readInt().coerceIn(1, 16)
             val peer = din.readUTF().ifBlank { "Another phone" }
-            val viaQr = din.readBoolean()
+            // Only the QR code carries the token: anyone else (nearby list, typed code) needs Accept.
+            val viaQr = din.readUTF().let { it.isNotEmpty() && it == inv.token }
             if (!viaQr) {
                 // Found via the nearby list, not by scanning our code: ask first.
                 s.decision = CompletableDeferred()
@@ -412,7 +416,7 @@ object Engine {
             dout.writeByte(1); dout.writeUTF(me); dout.flush()
             s.dout = dout
             advert?.cancel(); p2p?.stopAdvertising()
-            set(s.gen) { it.copy(phase = Phase.Connecting, qr = null, connected = true, peer = peer, discoverable = false) }
+            set(s.gen) { it.copy(phase = Phase.Connecting, qr = null, code = null, connected = true, peer = peer, discoverable = false) }
 
             launch {
                 repeat(streams) {
@@ -441,13 +445,6 @@ object Engine {
         var ips = inv.ips
         when (inv.type) {
             Invite.LAN -> Unit // debug: already on a shared network
-            Invite.HOTSPOT -> {
-                set(s.gen) { it.copy(step = "Joining the receiver's hotspot…", tip = "If Android shows a \"connect to device\" popup, tap the network in it.") }
-                val h = s.keep(HotspotClient(ctx))
-                h.join(inv)
-                linkSecs = secs()
-                set(s.gen) { it.copy(freqMhz = h.freq, link = linkLabel(inv.type, h.freq), tip = null) }
-            }
             else -> {
                 val p = s.keep(P2p(ctx))
                 if (inv.freq >= 5000 && !p.supports5GHz()) throw IOException(
@@ -456,7 +453,7 @@ object Engine {
                 )
                 // Returns once Android says the link is up; we dial the owner it reports straight away.
                 val sta = staFreq(ctx)
-                p.join(inv) { n ->
+                p.join(inv, sta) { n ->
                     set(s.gen) {
                         it.copy(
                             step = "Joining… retry $n of 3",
@@ -480,7 +477,7 @@ object Engine {
         val din = DataInputStream(BufferedInputStream(ctrl.getInputStream()))
         val dout = DataOutputStream(BufferedOutputStream(ctrl.getOutputStream()))
         val streams = Prefs.streams(ctx)
-        dout.writeInt(Proto.MAGIC); dout.writeInt(streams); dout.writeUTF(Prefs.deviceName(ctx)); dout.writeBoolean(s.viaQr); dout.flush()
+        dout.writeInt(Proto.MAGIC); dout.writeInt(streams); dout.writeUTF(Prefs.deviceName(ctx)); dout.writeUTF(if (s.viaQr) inv.token else ""); dout.flush()
         if (!s.viaQr) set(s.gen) { it.copy(step = "Waiting for ${inv.name.ifBlank { "the receiver" }} to accept…") }
         if (din.readByte().toInt() != 1) throw IOException("${inv.name.ifBlank { "The receiver" }} declined the transfer.")
         val peer = din.readUTF()
@@ -578,48 +575,107 @@ object Engine {
         }
     }
 
-    private fun recvLoop(sc: SocketChannel, s: Session) {
+    /**
+     * Chunk buffers per stream and direction. With one buffer, a stream stops pulling from the
+     * network while it writes to storage (and stops sending while it reads the file), so the link
+     * idles in between. With 3, disk and network overlap. Allocated lazily: one-way sessions don't
+     * pay for the idle direction.
+     */
+    private const val DEPTH = 3
+
+    private class Buffers {
+        private val pool = Channel<ByteBuffer>(DEPTH)
+        private var made = 0 // touched only by the coroutine that calls take()
+        suspend fun take(): ByteBuffer = pool.tryReceive().getOrNull()
+            ?: if (made < DEPTH) { made++; ByteBuffer.allocateDirect(Proto.CHUNK) } else pool.receive()
+        fun give(b: ByteBuffer) { pool.trySend(b) } // never more buffers than capacity, so never fails
+    }
+
+    private class InChunk(val buf: ByteBuffer, val t: Track, val off: Long, val len: Int, val sum: Int)
+
+    /** Network → [InChunk] queue → storage writer on its own thread. */
+    private suspend fun recvLoop(sc: SocketChannel, s: Session) = coroutineScope {
+        val bufs = Buffers()
+        val filled = Channel<InChunk>(DEPTH - 1)
+        launch {
+            val crc = CRC32()
+            try {
+                for (c in filled) {
+                    try { store(c, s, crc) } finally { bufs.give(c.buf) }
+                }
+            } catch (e: Throwable) {
+                // The reader may sit in a blocking socket read that cancellation can't interrupt:
+                // fail the session now so it closes the sockets and shows the error.
+                if (e !is CancellationException && !s.ending) s.fail(e)
+                throw e
+            }
+        }
         val hdr = ByteBuffer.allocate(Proto.HDR)
-        var lazyBuf: ByteBuffer? = null
-        val crc = CRC32()
-        while (true) {
-            hdr.clear(); readFully(sc, hdr); hdr.flip()
-            val idx = hdr.int
-            if (idx < 0) break
-            val buf = lazyBuf ?: ByteBuffer.allocateDirect(Proto.CHUNK).also { lazyBuf = it }
-            val off = hdr.long; val len = hdr.int; val sum = hdr.int
-            val t = s.ins.getOrNull(idx)
-            if (t == null || len !in 1..Proto.CHUNK) throw IOException("Bad data from the other phone")
-            buf.clear(); buf.limit(len); readFully(sc, buf); buf.flip()
-            if (t.skipped) continue // in flight when cancelled: drop it
-            crc.reset(); crc.update(buf); buf.rewind()
-            if (crc.value.toInt() != sum) throw IOException("Corrupted data (checksum mismatch)")
-            try { t.openSink().write(buf, off) } catch (e: IOException) { if (t.skipped) continue else throw e }
-            if (t.skipped) { t.sink?.abort(); continue } // cancelled while we were writing
-            synchronized(t.chunks) { t.chunks.set((off / Proto.CHUNK).toInt()) }
-            if (t.got.addAndGet(len.toLong()) >= t.size) s.finishIn(t)
+        try {
+            while (true) {
+                hdr.clear(); readFully(sc, hdr); hdr.flip()
+                val idx = hdr.int
+                if (idx < 0) break
+                val off = hdr.long; val len = hdr.int; val sum = hdr.int
+                val t = s.ins.getOrNull(idx)
+                if (t == null || len !in 1..Proto.CHUNK) throw IOException("Bad data from the other phone")
+                val buf = bufs.take()
+                buf.clear(); buf.limit(len); readFully(sc, buf); buf.flip()
+                filled.send(InChunk(buf, t, off, len, sum))
+            }
+        } finally {
+            filled.close() // writer drains what's queued, then ends
         }
     }
 
-    private suspend fun sendLoop(sc: SocketChannel, s: Session) {
-        val hdr = ByteBuffer.allocate(Proto.HDR)
-        var lazyBuf: ByteBuffer? = null // most sessions only send one way: don't hold 4 MB per idle stream
-        val crc = CRC32()
-        for (c in s.queue) {
-            val buf = lazyBuf ?: ByteBuffer.allocateDirect(Proto.CHUNK).also { lazyBuf = it }
-            val t = s.outs[c.file]
-            if (t.skipped) { if (t.chunksLeft.decrementAndGet() <= 0) t.closeSource(); continue }
-            buf.clear(); buf.limit(c.len)
-            try { t.source().read(buf, c.off) } catch (e: IOException) {
-                if (s.ending) throw e
-                // File vanished or became unreadable: drop just this file, keep the session going.
-                s.skipOut(t.idx, tell = true); t.chunksLeft.decrementAndGet(); continue
+    private fun store(c: InChunk, s: Session, crc: CRC32) {
+        val t = c.t
+        if (t.skipped) return // in flight when cancelled: drop it
+        crc.reset(); crc.update(c.buf); c.buf.rewind()
+        if (crc.value.toInt() != c.sum) throw IOException("Corrupted data (checksum mismatch)")
+        try { t.openSink().write(c.buf, c.off) } catch (e: IOException) { if (t.skipped) return else throw e }
+        if (t.skipped) { t.sink?.abort(); return } // cancelled while we were writing
+        synchronized(t.chunks) { t.chunks.set((c.off / Proto.CHUNK).toInt()) }
+        if (t.got.addAndGet(c.len.toLong()) >= t.size) s.finishIn(t)
+    }
+
+    private class OutChunk(val buf: ByteBuffer, val c: Chunk, val t: Track, val sum: Int)
+
+    /** File reader (read-ahead on its own thread) → [OutChunk] queue → network. */
+    private suspend fun sendLoop(sc: SocketChannel, s: Session) = coroutineScope {
+        val bufs = Buffers()
+        val ready = Channel<OutChunk>(DEPTH - 1)
+        launch {
+            val crc = CRC32()
+            try {
+                for (c in s.queue) {
+                    val t = s.outs[c.file]
+                    if (t.skipped) { if (t.chunksLeft.decrementAndGet() <= 0) t.closeSource(); continue }
+                    val buf = bufs.take()
+                    buf.clear(); buf.limit(c.len)
+                    try { t.source().read(buf, c.off) } catch (e: IOException) {
+                        bufs.give(buf)
+                        if (s.ending) throw e
+                        // File vanished or became unreadable: drop just this file, keep the session going.
+                        s.skipOut(t.idx, tell = true); t.chunksLeft.decrementAndGet(); continue
+                    }
+                    buf.flip()
+                    crc.reset(); crc.update(buf); buf.rewind()
+                    ready.send(OutChunk(buf, c, t, crc.value.toInt()))
+                }
+            } finally {
+                ready.close()
             }
-            buf.flip()
-            crc.reset(); crc.update(buf); buf.rewind()
-            hdr.clear(); hdr.putInt(c.file).putLong(c.off).putInt(c.len).putInt(crc.value.toInt()).flip()
-            writeFully(sc, hdr, buf) // gathering write: one syscall for header + data
-            t.got.addAndGet(c.len.toLong())
+        }
+        val hdr = ByteBuffer.allocate(Proto.HDR)
+        for (o in ready) {
+            val t = o.t
+            if (!t.skipped) {
+                hdr.clear(); hdr.putInt(o.c.file).putLong(o.c.off).putInt(o.c.len).putInt(o.sum).flip()
+                writeFully(sc, hdr, o.buf) // gathering write: one syscall for header + data
+                t.got.addAndGet(o.c.len.toLong())
+            }
+            bufs.give(o.buf)
             if (t.chunksLeft.decrementAndGet() <= 0) t.closeSource()
         }
         hdr.clear(); hdr.putInt(-1).putLong(0).putInt(0).putInt(0).flip()

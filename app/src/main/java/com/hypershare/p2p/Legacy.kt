@@ -11,9 +11,9 @@ import java.io.Closeable
 import java.io.IOException
 
 /**
- * Android 8–9 sender: join the receiver's Wi-Fi Direct group or hotspot as an ordinary Wi-Fi client.
+ * Android 8–9 sender: join the receiver's Wi-Fi Direct group as an ordinary Wi-Fi client.
  * (Android 10+ uses WifiP2pConfig.Builder / WifiNetworkSpecifier instead, which don't exist on 8–9.)
- * A Wi-Fi Direct group owner is a normal WPA2 access point, so this works for both link types.
+ * A Wi-Fi Direct group owner is a normal WPA2 access point, so this works.
  * The phone leaves its current Wi-Fi network while joined; [close] reconnects it.
  */
 @SuppressLint("MissingPermission")

@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
     }.toTypedArray()
 
     /**
-     * Android 8–12 (and hotspot joins on many phones) silently fail to find the other phone when
+     * Android 8–12 silently fail to find the other phone when
      * Location is off. Check first and say so, instead of a long, mysterious wait.
      */
     private var locationPrompt by mutableStateOf<(() -> Unit)?>(null)
@@ -83,8 +83,8 @@ class MainActivity : ComponentActivity() {
         else lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) || lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
     }
 
-    private fun withLocation(hotspot: Boolean, then: () -> Unit) {
-        if ((Build.VERSION.SDK_INT < 33 || hotspot) && !locationOn()) locationPrompt = then else then()
+    private fun withLocation(then: () -> Unit) {
+        if (Build.VERSION.SDK_INT < 33 && !locationOn()) locationPrompt = then else then()
     }
 
     private val scanner = registerForActivityResult(ScanContract()) { r ->
@@ -92,8 +92,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun start(code: String, viaQr: Boolean) {
-        val hotspot = code.split('|').getOrNull(1) == "H"
-        withPerms(transferPerms()) { withLocation(hotspot) {
+        withPerms(transferPerms()) { withLocation {
             Engine.startSend(this, pendingItems, code, pendingBench, viaQr)
             picking = false; choosing = false
             selected.clear()
@@ -101,7 +100,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receive() = withPerms(transferPerms()) {
-        withLocation(Prefs.link(this) == Prefs.LINK_HOTSPOT) { Engine.startReceive(this) }
+        withLocation { Engine.startReceive(this) }
     }
 
     /** Picker "Send"/"Add": add to the open session, or go choose a receiver. */
@@ -199,6 +198,7 @@ class MainActivity : ComponentActivity() {
                     bytes = pendingItems.sumOf { it.size },
                     bench = pendingBench,
                     onPeer = { p -> start(p.invite, viaQr = false) },
+                    onCode = { inv -> start(inv, viaQr = false) },
                     onScan = { scan() },
                     onBack = { choosing = false; if (!pendingBench) picking = true },
                 )
@@ -300,7 +300,6 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val streams by Prefs.streamsFlow.collectAsStateWithLifecycle()
-    val link by Prefs.linkFlow.collectAsStateWithLifecycle()
     val update by Updater.ui.collectAsStateWithLifecycle()
 
     ModalBottomSheet(onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
@@ -316,23 +315,6 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
                 supportingText = { Text("Shown to the other phone and in its Nearby list.") },
             )
             Spacer(Modifier.height(16.dp))
-
-            Text("Connection", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "Set on the receiving phone. If Wi-Fi Direct is slow or dips, try Hotspot: many phones run it on a wider 5 GHz channel. The sender confirms joining once.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(10.dp))
-            val links = listOf(Prefs.LINK_DIRECT to "Wi-Fi Direct", Prefs.LINK_HOTSPOT to "Hotspot")
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                links.forEachIndexed { i, (k, label) ->
-                    SegmentedButton(
-                        selected = link == k, onClick = { Prefs.setLink(ctx, k) },
-                        shape = SegmentedButtonDefaults.itemShape(i, links.size),
-                    ) { Text(label) }
-                }
-            }
-            Spacer(Modifier.height(20.dp))
 
             Text("Parallel streams", style = MaterialTheme.typography.titleMedium)
             Text(

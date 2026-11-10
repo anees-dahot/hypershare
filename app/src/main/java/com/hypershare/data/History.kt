@@ -59,18 +59,11 @@ object Prefs {
     private val _streams = MutableStateFlow(4)
     val streamsFlow: StateFlow<Int> = _streams
 
-    const val LINK_DIRECT = "direct"
-    const val LINK_HOTSPOT = "hotspot"
-    private val _link = MutableStateFlow(LINK_DIRECT)
-    val linkFlow: StateFlow<String> = _link
 
     fun load(ctx: Context) {
         _streams.value = prefs(ctx).getInt("streams", 4)
-        _link.value = link(ctx)
         _name.value = deviceName(ctx)
     }
-    fun link(ctx: Context) = prefs(ctx).getString("link", LINK_DIRECT) ?: LINK_DIRECT
-    fun setLink(ctx: Context, v: String) { prefs(ctx).edit().putString("link", v).apply(); _link.value = v }
     private val _name = MutableStateFlow("")
     val nameFlow: StateFlow<String> = _name
 

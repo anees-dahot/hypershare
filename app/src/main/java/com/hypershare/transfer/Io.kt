@@ -19,7 +19,7 @@ import java.nio.channels.SocketChannel
 object Proto {
     const val DATA_PORT = 8988
     const val CTRL_PORT = 8989
-    const val MAGIC = 0x48535834 // "HSX4"
+    const val MAGIC = 0x48535835 // "HSX5"
     const val CHUNK = 4 * 1024 * 1024
     /** Chunk header: fileIdx Int, offset Long, len Int, crc Int. fileIdx -1 = end of stream. */
     const val HDR = 20
@@ -124,7 +124,10 @@ class Sink private constructor(
 
     /** Thread-safe positional write. */
     fun write(b: ByteBuffer, pos: Long) {
-        if (ch == null || aborted) return
+        if (ch == null) return // speed test: discard
+        // Must not look like success: the caller would mark the chunk as saved, and a later
+        // resume would skip data that never reached the file.
+        if (aborted) throw IOException("File closed")
         var p = pos
         while (b.hasRemaining()) p += ch.write(b, p)
     }

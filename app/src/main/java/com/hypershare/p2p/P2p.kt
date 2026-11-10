@@ -2,14 +2,7 @@ package com.hypershare.p2p
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
-import android.net.wifi.SoftApConfiguration
-import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSpecifier
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pInfo
@@ -17,52 +10,83 @@ import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import android.os.Build
-import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.IOException
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * What the receiver shares (QR code or nearby discovery): how to join its link, which IPs to dial,
- * and its display name. type: D = Wi-Fi Direct group, H = local-only hotspot, L = debug LAN.
+ * What the receiver shares (QR code, nearby discovery, or a typed code): how to join its
+ * Wi-Fi Direct group, which IPs to dial, and its display name. type: D = Wi-Fi Direct, L = debug LAN.
+ * [token] is only in the QR code: proof the sender saw the receiver's screen, so no Accept is needed.
  */
 data class Invite(
     val type: Char,
     val ssid: String,
     val pass: String,
     val freq: Int,
-    val wpa3: Boolean,
     val ips: List<String>,
     val name: String = "",
+    val token: String = "",
 ) {
-    fun encode() = listOf(
-        "HSX4", "$type", ssid, pass, "$freq", if (wpa3) "1" else "0", ips.joinToString(","),
-        name.replace('|', ' ').take(30),
+    fun encode(withToken: Boolean = true) = listOf(
+        "HSX5", "$type", ssid, pass, "$freq", ips.joinToString(","),
+        name.replace('|', ' ').take(30), if (withToken) token else "",
     ).joinToString("|")
 
     companion object {
         const val DIRECT = 'D'
-        const val HOTSPOT = 'H'
         const val LAN = 'L' // debug builds only
 
         fun decode(s: String): Invite {
-            val p = s.split('|')
-            require(p.size == 8 && p[0] == "HSX4") {
+            val p = s.trim().split('|')
+            require(p.size == 8 && p[0] == "HSX5") {
                 if (p.firstOrNull()?.startsWith("HSX") == true) "The other phone runs a different HyperShare version. Update both phones."
                 else "That's not a HyperShare code."
             }
-            return Invite(p[1][0], p[2], p[3], p[4].toIntOrNull() ?: 0, p[5] == "1", p[6].split(',').filter { it.isNotBlank() }, p[7])
+            return Invite(p[1][0], p[2], p[3], p[4].toIntOrNull() ?: 0, p[5].split(',').filter { it.isNotBlank() }, p[6], p[7])
+        }
+
+        /** Invite rebuilt from a 6-character code (typed, or read from a nearby group's Wi-Fi name). */
+        fun fromCode(code: String, freq: Int = 0, name: String = ""): Invite {
+            val c = normCode(code)
+            return Invite(DIRECT, ssidFor(c), passFor(c), freq, listOf(P2p.GO_IP), name)
         }
     }
+}
+
+/**
+ * Group names look like "DIRECT-hsAB3K7Q": prefix + 6-char code. No device name in it, so a typed
+ * code alone rebuilds the exact name (the name travels in the QR code / service discovery instead).
+ */
+const val SSID_PREFIX = "DIRECT-hs"
+const val CODE_LEN = 6
+internal const val CODE_ABC = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+fun normCode(c: String) = c.uppercase().filter { it in CODE_ABC }
+
+/** The code in a HyperShare group's Wi-Fi name, or null. */
+fun codeOf(ssid: String): String? {
+    if (ssid.length != SSID_PREFIX.length + CODE_LEN || !ssid.startsWith(SSID_PREFIX)) return null
+    return ssid.substring(SSID_PREFIX.length).takeIf { normCode(it) == it }
+}
+
+fun ssidFor(code: String) = SSID_PREFIX + code
+
+/**
+ * Passphrase derived from the code, so a phone that only knows the code (typed, or read from a
+ * Wi-Fi scan) can join. Joining alone grants nothing: without the QR token the receiver must tap Accept.
+ */
+fun passFor(code: String): String {
+    val d = java.security.MessageDigest.getInstance("SHA-256").digest("hypershare-v5:$code".toByteArray())
+    return d.take(14).joinToString("") { CODE_ABC[(it.toInt() and 0xff) % CODE_ABC.length].toString() }
 }
 
 const val SERVICE_TYPE = "_hypershare._tcp"
@@ -98,9 +122,9 @@ internal suspend fun p2pAct(call: (WifiP2pManager.ActionListener) -> Unit) =
         })
     }
 
-private fun rnd(n: Int): String {
-    val abc = "abcdefghjkmnpqrstuvwxyz23456789"
-    return (1..n).map { abc.random() }.joinToString("")
+internal fun rnd(n: Int, abc: String = "abcdefghjkmnpqrstuvwxyz23456789"): String {
+    val r = java.security.SecureRandom()
+    return (1..n).map { abc[r.nextInt(abc.length)] }.joinToString("")
 }
 
 // ------------------------------------------------------------------ Wi-Fi Direct
@@ -118,51 +142,59 @@ class P2p(private val ctx: Context) : Closeable {
 
     /**
      * Receiver side: become group owner. Channel preference:
-     * 1. the 5 GHz channel this phone's Wi-Fi already uses (single channel = steady speed),
-     * 2. any 5 GHz channel, 3. whatever the chip allows.
+     * 1. the 5 GHz channel this phone's Wi-Fi already uses: the sender is usually on the same
+     *    router, so both radios stay on one channel. Phones whose chip can't run two channels at
+     *    once (many MediaTek/Unisoc models) can't join a group on another channel at all.
+     * 2. a known-good 5 GHz channel, 3. whatever the chip allows.
      */
     suspend fun host(sta: Int, name: String, only24: Boolean = false): Pair<Invite, WifiP2pGroup> {
         if (groupInfo() != null) removeGroup()
-        if (Build.VERSION.SDK_INT < 29) return hostLegacy(name)
-        val ssid = "DIRECT-hs-" + rnd(4)
-        val pass = rnd(12)
+        val token = rnd(10)
+        if (Build.VERSION.SDK_INT < 29) return hostLegacy(name, token)
+        val code = rnd(CODE_LEN, CODE_ABC)
+        val ssid = ssidFor(code)
+        val pass = passFor(code)
         val tries = buildList {
-            // Compatibility mode for 2.4 GHz-only senders: same channel as our Wi-Fi if it's 2.4, else any 2.4.
             if (only24) {
                 if (sta in 2400..2500) add(base(ssid, pass).setGroupOperatingFrequency(sta).build())
                 add(base(ssid, pass).setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ).build())
-            }
-            if (!only24) {
-                // Share the router's channel only if it's not a DFS (radar) channel: a group there is
-                // hard or impossible for the other phone to find, which made joins take minutes.
+            } else {
+                // Router's channel, but never a radar (DFS) one: a group there is hard or impossible
+                // for the other phone to find (passive scan only), which made joins take minutes.
                 if (nonDfs5(sta)) add(base(ssid, pass).setGroupOperatingFrequency(sta).build())
-                // Otherwise pick a known-good 5 GHz channel ourselves (149, then 36).
                 add(base(ssid, pass).setGroupOperatingFrequency(5745).build())
                 add(base(ssid, pass).setGroupOperatingFrequency(5180).build())
                 add(base(ssid, pass).setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ).build())
+                // 2.4 GHz router: same channel still beats a group the sender can't reach.
+                if (sta in 2400..2500) add(base(ssid, pass).setGroupOperatingFrequency(sta).build())
             }
             add(base(ssid, pass).setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO).build())
         }
         var last: IOException? = null
         for (cfg in tries) {
             last = try { p2pAct { mgr.createGroup(ch, cfg, it) }; null } catch (e: IOException) { e }
-            if (last == null) break
+            if (last == null) {
+                // Some chips accept the request and then never bring the group up on that channel.
+                waitGroup()?.let { g -> return Invite(Invite.DIRECT, ssid, pass, groupFreq(g), listOf(GO_IP), name, token) to g }
+                removeGroup()
+                last = IOException("Wi-Fi Direct group did not come up")
+            }
             delay(300)
         }
-        last?.let { throw it }
-        repeat(40) {
-            groupInfo()?.let { g -> return Invite(Invite.DIRECT, ssid, pass, groupFreq(g), false, listOf(GO_IP), name) to g }
-            delay(200)
-        }
-        throw IOException("Wi-Fi Direct group did not come up")
+        throw last ?: IOException("Wi-Fi Direct group did not come up")
+    }
+
+    private suspend fun waitGroup(): WifiP2pGroup? {
+        repeat(25) { groupInfo()?.let { return it }; delay(200) }
+        return null
     }
 
     /** Android 8–9: no config builder, so let the chip pick name/passphrase and read them back. */
-    private suspend fun hostLegacy(name: String): Pair<Invite, WifiP2pGroup> {
+    private suspend fun hostLegacy(name: String, token: String): Pair<Invite, WifiP2pGroup> {
         p2pAct { mgr.createGroup(ch, it) }
         repeat(40) {
             groupInfo()?.takeIf { !it.passphrase.isNullOrEmpty() }?.let { g ->
-                return Invite(Invite.DIRECT, g.networkName, g.passphrase, 0, false, listOf(GO_IP), name) to g
+                return Invite(Invite.DIRECT, g.networkName, g.passphrase, 0, listOf(GO_IP), name, token) to g
             }
             delay(200)
         }
@@ -174,12 +206,26 @@ class P2p(private val ctx: Context) : Closeable {
      * so they can connect without scanning. Runs until cancelled.
      */
     suspend fun advertise(inv: Invite) {
-        val info = WifiP2pDnsSdServiceInfo.newInstance("HyperShare-" + rnd(4), SERVICE_TYPE, mapOf("i" to inv.encode()))
+        val info = WifiP2pDnsSdServiceInfo.newInstance("HyperShare-" + rnd(4), SERVICE_TYPE, mapOf("i" to inv.encode(withToken = false)))
         runCatching { p2pAct { mgr.clearLocalServices(ch, it) } }
         p2pAct { mgr.addLocalService(ch, info, it) }
-        // One discovery round makes us answer service queries. Don't repeat it: a group owner that
-        // keeps scanning leaves its channel and makes the sender's join slow or fail.
-        runCatching { p2pAct { mgr.discoverPeers(ch, it) } }
+        // A phone only answers service queries while its discovery runs, and Android ends discovery
+        // after ~2 min (some OEMs much sooner). Renew it, but rarely: a scanning group owner briefly
+        // leaves its channel. Senders also find us by our Wi-Fi name, which needs none of this.
+        // Once a phone has joined our group, stop: discovery makes the radio leave the group's
+        // channel, which slows the join and the transfer that follows.
+        var lastFind = 0L
+        var stopped = false
+        while (true) {
+            val joined = groupInfo()?.clientList?.isNotEmpty() == true
+            if (joined && !stopped) { runCatching { p2pAct { mgr.stopPeerDiscovery(ch, it) } }; stopped = true }
+            if (!joined) {
+                stopped = false
+                val now = System.currentTimeMillis()
+                if (now - lastFind > 45_000) { runCatching { p2pAct { mgr.discoverPeers(ch, it) } }; lastFind = now }
+            }
+            delay(1_000)
+        }
     }
 
     fun stopAdvertising() {
@@ -199,7 +245,7 @@ class P2p(private val ctx: Context) : Closeable {
      * connect, an old group), scan only the receiver's channel when we know it, and if a join
      * attempt stalls, cancel and retry quickly instead of waiting it out.
      */
-    suspend fun join(inv: Invite, onRetry: (Int) -> Unit = {}): String? {
+    suspend fun join(inv: Invite, sta: Int, onRetry: (Int) -> Unit = {}): String? {
         if (Build.VERSION.SDK_INT < 29) {
             legacy = LegacyJoin(ctx).also { it.join(inv.ssid, inv.pass) }
             return null
@@ -208,24 +254,33 @@ class P2p(private val ctx: Context) : Closeable {
         runCatching { p2pAct { mgr.cancelConnect(ch, it) } }
         if (groupInfo() != null) removeGroup()
         val b = base(inv.ssid, inv.pass)
-        val cfg = if (inv.freq > 0) b.setGroupOperatingFrequency(inv.freq).build()
-        else b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO).build()
-        // One channel to scan → seconds; unknown channel (Android 8–9 receiver) → scan everything, allow longer.
-        val wait = if (inv.freq > 0) 8_000L else 15_000L
-        repeat(3) { attempt ->
+        val pinned = if (inv.freq > 0) b.setGroupOperatingFrequency(inv.freq).build() else null
+        val any = base(inv.ssid, inv.pass).setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO).build()
+        // Our own Wi-Fi on another channel: the radio hops between both, so the scan takes longer.
+        val hop = sta > 0 && inv.freq > 0 && sta != inv.freq
+        // 1: scan only the receiver's channel (fast). 2: full scan, in case the channel hint is wrong
+        // or the chip won't scan a single channel while on Wi-Fi. 3: channel hint again, longer.
+        val plan = listOfNotNull(
+            pinned?.let { it to if (hop) 12_000L else 8_000L },
+            any to 15_000L,
+            (pinned ?: any) to 15_000L,
+        )
+        plan.forEachIndexed { attempt, (cfg, wait) ->
             if (attempt > 0) {
                 onRetry(attempt + 1)
                 runCatching { p2pAct { mgr.cancelConnect(ch, it) } }
                 if (groupInfo() != null) removeGroup()
-                delay(400)
+                delay(500)
             }
             val sent = runCatching { p2pAct { mgr.connect(ch, cfg, it) } }
-            if (sent.isFailure) { if (attempt == 2) throw sent.exceptionOrNull()!!; delay(700); return@repeat }
+            if (sent.isFailure) { if (attempt == plan.lastIndex) throw sent.exceptionOrNull()!!; delay(800); return@forEachIndexed }
             awaitGroup(wait)?.let { return it }
         }
         throw IOException(
-            "Couldn't join ${inv.name.ifBlank { "the receiver" }}'s Wi-Fi Direct. Move the phones closer and scan again." +
-                if (inv.freq <= 0) " If it still fails, turn this phone's Wi-Fi off and on." else ""
+            "Couldn't join ${inv.name.ifBlank { "the receiver" }}'s Wi-Fi Direct." +
+                if (sta > 0) " This phone is connected to a Wi-Fi network, and some phones can't do both at once: " +
+                    "disconnect from that network (keep Wi-Fi on) and try again."
+                else " Move the phones closer and try again. If it still fails, turn Wi-Fi off and on."
         )
     }
 
@@ -265,33 +320,42 @@ class P2p(private val ctx: Context) : Closeable {
 
 // ------------------------------------------------------------------ Nearby discovery (sender)
 
-data class NearbyPeer(val address: String, val name: String, val invite: String, val freq: Int, val seen: Long)
+data class NearbyPeer(val key: String, val name: String, val invite: String, val freq: Int, val seen: Long)
 
-/** Sender: finds receivers that advertise HyperShare over Wi-Fi Direct service discovery. */
+/**
+ * Sender: finds receivers two ways at once:
+ * - Wi-Fi Direct service discovery (works on Android 13+ without location),
+ * - the group's Wi-Fi name in normal Wi-Fi scan results ("DIRECT-hsCODE-Name"): group owners beacon
+ *   all the time, so this works even when the receiver's chip stopped answering discovery.
+ */
 @SuppressLint("MissingPermission")
 class Nearby(ctx: Context) {
     val peers = MutableStateFlow<List<NearbyPeer>>(emptyList())
-    private val mgr = ctx.getSystemService(WifiP2pManager::class.java)
+    private val app = ctx.applicationContext
+    private val mgr = app.getSystemService(WifiP2pManager::class.java)
+    private val wm = app.getSystemService(WifiManager::class.java)
+
+    private fun put(p: NearbyPeer) = peers.update { list ->
+        // The same receiver can show up via both paths; keep one entry, preferring the fresher one.
+        list.filter { it.key != p.key } + p
+    }
+
+    /** Frequency of a nearby group with this code, if a scan has seen it. */
+    fun freqFor(code: String): Int = peers.value.firstOrNull { it.key == code }?.freq ?: 0
 
     /** Scans until the calling coroutine is cancelled. */
     suspend fun run() {
+        coroutineScope {
+            launch { scanLoop() }
+            serviceLoop()
+        }
+    }
+
+    private suspend fun serviceLoop() {
         val mgr = mgr ?: return
-        val ch = mgr.initialize(ctxHolder ?: return, Looper.getMainLooper(), null) ?: return
+        val ch = mgr.initialize(app, Looper.getMainLooper(), null) ?: return
         try {
-            mgr.setDnsSdResponseListeners(ch, { _, _, _ -> }, { _, txt, dev ->
-                val raw = txt["i"] ?: return@setDnsSdResponseListeners
-                val inv = runCatching { Invite.decode(raw) }.getOrNull() ?: return@setDnsSdResponseListeners
-                val peer = NearbyPeer(dev.deviceAddress, inv.name.ifBlank { dev.deviceName ?: "Phone" }, raw, inv.freq, System.currentTimeMillis())
-                peers.update { list -> list.filter { it.address != peer.address } + peer }
-            })
-            runCatching { p2pAct { mgr.addServiceRequest(ch, WifiP2pDnsSdServiceRequest.newInstance(SERVICE_TYPE), it) } }
-            while (true) {
-                runCatching { p2pAct { mgr.discoverPeers(ch, it) } }
-                runCatching { p2pAct { mgr.discoverServices(ch, it) } }
-                delay(6_000)
-                val now = System.currentTimeMillis()
-                peers.update { list -> list.filter { now - it.seen < 40_000 } }
-            }
+            discoverServices(mgr, ch)
         } finally {
             // Don't stopPeerDiscovery here: this runs as the screen closes, which can be right as a
             // join starts, and would abort Android's own scan for the receiver. join() stops it safely.
@@ -300,125 +364,57 @@ class Nearby(ctx: Context) {
         }
     }
 
-    private val ctxHolder: Context? = ctx.applicationContext
-}
-
-// ------------------------------------------------------------------ Local-only hotspot
-
-/**
- * Receiver side of hotspot mode. Many phones run their hotspot on a wider 5 GHz channel
- * (80 MHz) than Wi-Fi Direct, so this can be noticeably faster on the same pair of phones.
- */
-@SuppressLint("MissingPermission")
-class HotspotHost(private val ctx: Context) : Closeable {
-    private var res: WifiManager.LocalOnlyHotspotReservation? = null
-
-    suspend fun start(name: String): Invite {
-        val wm = ctx.getSystemService(WifiManager::class.java)
-        val r = suspendCancellableCoroutine { c ->
-            wm.startLocalOnlyHotspot(object : WifiManager.LocalOnlyHotspotCallback() {
-                override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
-                    if (c.isActive) c.resume(reservation) else reservation.close()
-                }
-                override fun onFailed(reason: Int) {
-                    if (c.isActive) c.resumeWithException(IOException(
-                        "Couldn't start the hotspot. Turn off your normal hotspot" +
-                            (if (Build.VERSION.SDK_INT < 33) " and turn on Location" else "") + ", then try again."
-                    ))
-                }
-            }, Handler(Looper.getMainLooper()))
+    private suspend fun discoverServices(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+        mgr.setDnsSdResponseListeners(ch, { _, _, _ -> }, { _, txt, dev ->
+            val raw = txt["i"] ?: return@setDnsSdResponseListeners
+            val inv = runCatching { Invite.decode(raw) }.getOrNull() ?: return@setDnsSdResponseListeners
+            val key = codeOf(inv.ssid) ?: dev.deviceAddress
+            put(NearbyPeer(key, inv.name.ifBlank { dev.deviceName ?: "Phone" }, raw, inv.freq, System.currentTimeMillis()))
+        })
+        val req = WifiP2pDnsSdServiceRequest.newInstance(SERVICE_TYPE)
+        while (true) {
+            // Re-adding the request each round: many OEM builds answer only the first
+            // discoverServices() after a request was added, then go quiet.
+            runCatching { p2pAct { mgr.clearServiceRequests(ch, it) } }
+            runCatching { p2pAct { mgr.addServiceRequest(ch, req, it) } }
+            // discoverServices() runs its own peer scan; calling discoverPeers() first just makes it BUSY.
+            val started = runCatching { p2pAct { mgr.discoverServices(ch, it) } }.isSuccess
+            if (!started) runCatching { p2pAct { mgr.discoverPeers(ch, it) } }
+            delay(8_000)
+            prune()
         }
-        res = r
-        val (ssid, pass, wpa3) = if (Build.VERSION.SDK_INT >= 30) {
-            val c = r.softApConfiguration
-            @Suppress("DEPRECATION")
-            val n = if (Build.VERSION.SDK_INT >= 33) c.wifiSsid?.toString()?.removeSurrounding("\"") else c.ssid
-            Triple(n ?: "", c.passphrase ?: "", c.securityType == SoftApConfiguration.SECURITY_TYPE_WPA3_SAE)
-        } else {
-            @Suppress("DEPRECATION")
-            val w = r.wifiConfiguration ?: throw IOException("Hotspot has no configuration")
-            @Suppress("DEPRECATION")
-            Triple(w.SSID.removeSurrounding("\""), w.preSharedKey.removeSurrounding("\""), false)
-        }
-        // The hotspot interface gets its address a moment after start.
-        repeat(20) {
-            val ips = apIps()
-            if (ips.isNotEmpty()) return Invite(Invite.HOTSPOT, ssid, pass, 0, wpa3, ips, name)
-            delay(250)
-        }
-        throw IOException("Hotspot started but has no address")
     }
 
-    /** IPv4 addresses on Wi-Fi-like interfaces, minus the one used for the normal Wi-Fi connection. */
-    private fun apIps(): List<String> {
-        val cm = ctx.getSystemService(ConnectivityManager::class.java)
-        val sta = cm.activeNetwork?.let { cm.getLinkProperties(it) }?.linkAddresses
-            ?.mapNotNull { (it.address as? Inet4Address)?.hostAddress }.orEmpty().toSet()
-        return NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback && !it.name.startsWith("p2p") && !it.name.startsWith("rmnet") && !it.name.startsWith("ccmni") }
-            .flatMap { i -> i.inetAddresses.toList().filterIsInstance<Inet4Address>().map { i.name to it.hostAddress!! } }
-            .filter { (_, ip) -> ip !in sta && (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) }
-            .sortedBy { (n, _) -> if (n.startsWith("wlan") || n.startsWith("swlan") || n.startsWith("ap")) 0 else 1 }
-            .map { it.second }
+    private fun prune() {
+        val now = System.currentTimeMillis()
+        peers.update { list -> list.filter { now - it.seen < 40_000 } }
     }
 
-    override fun close() { runCatching { res?.close() }; res = null }
-}
-
-/** Sender side of hotspot mode: join via WifiNetworkSpecifier and route this app's sockets over it. */
-class HotspotClient(private val ctx: Context) : Closeable {
-    private val cm = ctx.getSystemService(ConnectivityManager::class.java)
-    private var cb: ConnectivityManager.NetworkCallback? = null
-    var freq = 0; private set
-    private var legacy: LegacyJoin? = null
-
-    suspend fun join(inv: Invite) {
-        if (Build.VERSION.SDK_INT < 29) {
-            legacy = LegacyJoin(ctx).also { it.join(inv.ssid, inv.pass); freq = it.freq }
-            return
+    /** Adds HyperShare groups from the latest Wi-Fi scan results (needs location; skipped quietly without it). */
+    @Suppress("DEPRECATION")
+    private fun ingest() {
+        val results = runCatching { wm?.scanResults }.getOrNull() ?: return
+        for (r in results) {
+            val ssid = (if (Build.VERSION.SDK_INT >= 33) r.wifiSsid?.toString()?.removeSurrounding("\"") else r.SSID) ?: continue
+            val code = codeOf(ssid) ?: continue
+            // Scan results can be minutes old; only trust recent ones (timestamp is µs since boot).
+            val ageMs = android.os.SystemClock.elapsedRealtime() - r.timestamp / 1000
+            if (ageMs > 60_000) continue
+            // Prefer the service-discovery entry if we have one: it carries the receiver's name.
+            val old = peers.value.firstOrNull { it.key == code }
+            put(NearbyPeer(code, old?.name ?: "Phone $code", old?.invite ?: Invite.fromCode(code, r.frequency).encode(), r.frequency, System.currentTimeMillis()))
         }
-        joinModern(inv)
     }
 
-    @androidx.annotation.RequiresApi(29)
-    private suspend fun joinModern(inv: Invite) {
-        val spec = WifiNetworkSpecifier.Builder().setSsid(inv.ssid).apply {
-            if (inv.wpa3) setWpa3Passphrase(inv.pass) else setWpa2Passphrase(inv.pass)
-        }.build()
-        val req = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .setNetworkSpecifier(spec)
-            .build()
-        val net = withTimeoutOrNull(60_000) {
-            suspendCancellableCoroutine<Network> { c ->
-                val callback = object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) { if (c.isActive) c.resume(network) }
-                    override fun onUnavailable() {
-                        if (c.isActive) c.resumeWithException(IOException("Couldn't join the receiver's hotspot"))
-                    }
-                }
-                cb = callback
-                try {
-                    cm.requestNetwork(req, callback)
-                } catch (e: Exception) {
-                    // Some OEM builds refuse specifier requests outright (e.g. missing location permission).
-                    if (c.isActive) c.resumeWithException(IOException("This phone refused to join the hotspot (${e.javaClass.simpleName}: ${e.message}). Use Wi-Fi Direct instead."))
-                }
-            }
-        } ?: throw IOException(
-            "Couldn't join the receiver's hotspot. Check that Wi-Fi and Location are on, " +
-                "or switch the receiving phone to Wi-Fi Direct in Settings."
-        )
-        // Route all of this app's sockets over the hotspot while the transfer runs.
-        cm.bindProcessToNetwork(net)
-        freq = (cm.getNetworkCapabilities(net)?.transportInfo as? WifiInfo)?.frequency ?: 0
-    }
-
-    override fun close() {
-        legacy?.close(); legacy = null
-        runCatching { cm.bindProcessToNetwork(null) }
-        cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
-        cb = null
+    @Suppress("DEPRECATION")
+    private suspend fun scanLoop() {
+        var lastScan = 0L
+        while (true) {
+            val now = System.currentTimeMillis()
+            // Android allows 4 scans per 2 minutes per app; results from other apps' scans come free.
+            if (now - lastScan > 30_000) { runCatching { wm?.startScan() }; lastScan = now }
+            ingest()
+            delay(3_000)
+        }
     }
 }

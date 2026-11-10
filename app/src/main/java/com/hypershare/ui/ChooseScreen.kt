@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.*
@@ -18,7 +19,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.hypershare.p2p.CODE_LEN
+import com.hypershare.p2p.Invite
 import com.hypershare.p2p.Nearby
+import com.hypershare.p2p.normCode
 import com.hypershare.p2p.NearbyPeer
 
 /**
@@ -31,6 +35,8 @@ fun ChooseScreen(
     bytes: Long,
     bench: Boolean,
     onPeer: (NearbyPeer) -> Unit,
+    /** Encoded invite rebuilt from a typed code. */
+    onCode: (String) -> Unit,
     onScan: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -38,6 +44,14 @@ fun ChooseScreen(
     val nearby = remember { Nearby(ctx) }
     val peers by nearby.peers.collectAsState()
     LaunchedEffect(Unit) { runCatching { nearby.run() } }
+    var typing by remember { mutableStateOf(false) }
+    // Android 13+: Wi-Fi scan results (our second way to find receivers) still need location.
+    fun hasLoc() = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    var locOk by remember { mutableStateOf(android.os.Build.VERSION.SDK_INT < 33 || hasLoc()) }
+    val locAsk = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { locOk = hasLoc() }
 
     Column(Modifier.fillMaxSize().systemBarsPadding()) {
         Column(Modifier.padding(horizontal = 20.dp)) {
@@ -65,13 +79,19 @@ fun ChooseScreen(
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "On the other phone, open HyperShare and tap Receive. It appears here within a few seconds. " +
-                            "If it doesn't (for example in Hotspot mode), scan its code instead.",
+                            "If it doesn't, scan its QR code or type the 6-character code shown under it.",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     )
+                    if (!locOk) {
+                        Spacer(Modifier.height(8.dp))
+                        TextButton({
+                            locAsk.launch(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION))
+                        }, Modifier.align(Alignment.CenterHorizontally)) { Text("Not showing up? Allow location to search harder") }
+                    }
                 }
             }
-            items(peers, key = { it.address }) { p ->
+            items(peers, key = { it.key }) { p ->
                 AnimatedVisibility(true, enter = fadeIn() + expandVertically()) {
                     Surface(
                         onClick = { onPeer(p) }, modifier = Modifier.fillMaxWidth(),
@@ -98,10 +118,45 @@ fun ChooseScreen(
             }
         }
 
-        OutlinedButton(onScan, Modifier.fillMaxWidth().padding(20.dp).height(54.dp)) {
-            Icon(Icons.Outlined.QrCodeScanner, null); Spacer(Modifier.width(10.dp))
-            Text("Scan a code instead", style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.fillMaxWidth().padding(20.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(onScan, Modifier.weight(1f).height(54.dp)) {
+                Icon(Icons.Outlined.QrCodeScanner, null); Spacer(Modifier.width(8.dp))
+                Text("Scan QR", style = MaterialTheme.typography.titleMedium)
+            }
+            OutlinedButton({ typing = true }, Modifier.weight(1f).height(54.dp)) {
+                Icon(Icons.Outlined.Keyboard, null); Spacer(Modifier.width(8.dp))
+                Text("Enter code", style = MaterialTheme.typography.titleMedium)
+            }
         }
+    }
+
+    if (typing) {
+        var code by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { typing = false },
+            title = { Text("Enter code") },
+            text = {
+                Column {
+                    Text("Shown under the QR code on the receiving phone.", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        code, { code = normCode(it).take(CODE_LEN) }, singleLine = true,
+                        placeholder = { Text("AB3K7Q") },
+                        textStyle = MaterialTheme.typography.headlineSmall,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Characters,
+                            autoCorrectEnabled = false,
+                        ),
+                    )
+                }
+            },
+            confirmButton = {
+                Button({ typing = false; onCode(Invite.fromCode(code, nearby.freqFor(code)).encode()) }, enabled = code.length == CODE_LEN) {
+                    Text(if (bench) "Test" else "Connect")
+                }
+            },
+            dismissButton = { TextButton({ typing = false }) { Text("Cancel") } },
+        )
     }
 }
 
