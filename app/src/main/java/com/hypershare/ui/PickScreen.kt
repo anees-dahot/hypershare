@@ -1,5 +1,10 @@
 package com.hypershare.ui
 
+import androidx.compose.material.icons.outlined.EditNote
+import androidx.compose.material.icons.outlined.ContentPaste
+import com.hypershare.data.textEntity
+import android.widget.Toast
+import kotlinx.coroutines.CancellationException
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -80,26 +85,71 @@ fun PickScreen(
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // Text snippets (a note, a link, the clipboard) join the selection like any picked file.
+    fun addText(t: String) {
+        if (t.isBlank()) return
+        val e = textEntity(t)
+        if (docs.none { it.key == e.key }) docs.add(0, e)
+        selected[e.key] = e
+    }
+    fun paste() {
+        val clip = runCatching {
+            ctx.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip
+                ?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
+        }.getOrNull()
+        if (clip.isNullOrBlank()) Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show() else addText(clip)
+    }
+    var writing by rememberSaveable { mutableStateOf(false) }
+    if (writing) {
+        var draft by rememberSaveable { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { writing = false },
+            title = { Text("Send text") },
+            text = {
+                OutlinedTextField(
+                    draft, { draft = it }, Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 280.dp),
+                    placeholder = { Text("A note, a link, an address…") },
+                )
+            },
+            confirmButton = { Button({ addText(draft); writing = false }, enabled = draft.isNotBlank()) { Text("Add") } },
+            dismissButton = { TextButton({ writing = false }) { Text("Cancel") } },
+        )
+    }
+
     fun hasMedia() = mediaPerms().any { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED } ||
         (Build.VERSION.SDK_INT >= 34 && ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED)
     var granted by remember { mutableStateOf(hasMedia()) }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted = hasMedia() }
-    LaunchedEffect(Unit) { if (!granted) permLauncher.launch(mediaPerms()) }
+    // Ask once: without this a denied prompt comes back on every rotation.
+    var asked by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) { if (!granted && !asked) { asked = true; permLauncher.launch(mediaPerms()) } }
 
-    val apps by produceState<List<Entity>?>(null) { value = MediaRepo.apps(ctx) }
+    val apps by produceState<List<Entity>?>(null) { value = runCatching { MediaRepo.apps(ctx) }.getOrDefault(emptyList()) }
     val photos by produceState<List<Entity>?>(null, granted) { value = if (granted) MediaRepo.media(ctx, MediaKind.Photos) else emptyList() }
     val videos by produceState<List<Entity>?>(null, granted) { value = if (granted) MediaRepo.media(ctx, MediaKind.Videos) else emptyList() }
     val music by produceState<List<Entity>?>(null, granted) { value = if (granted) MediaRepo.media(ctx, MediaKind.Music) else emptyList() }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) scope.launch {
-            MediaRepo.documents(ctx, uris).forEach { e -> if (docs.none { it.key == e.key }) docs.add(0, e); selected[e.key] = e }
+            // A provider (cloud drive, another app) can fail or deny the query: say so instead of crashing.
+            val picked = try { MediaRepo.documents(ctx, uris) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                Toast.makeText(ctx, "Couldn't read those files", Toast.LENGTH_SHORT).show(); return@launch
+            }
+            picked.forEach { e ->
+                if (docs.none { it.key == e.key }) docs.add(0, e)
+                selected[e.key] = e
+            }
         }
     }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
         if (tree != null) scope.launch {
-            val e = MediaRepo.folder(ctx, tree)
-            if (docs.none { it.key == e.key }) docs.add(0, e); selected[e.key] = e
+            val e = try { MediaRepo.folder(ctx, tree) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                Toast.makeText(ctx, "Couldn't read that folder", Toast.LENGTH_SHORT).show(); return@launch
+            }
+            if (e.parts.isEmpty()) { Toast.makeText(ctx, "That folder is empty", Toast.LENGTH_SHORT).show(); return@launch }
+            if (docs.none { it.key == e.key }) docs.add(0, e)
+            selected[e.key] = e
         }
     }
 
@@ -132,7 +182,7 @@ fun PickScreen(
                 1 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(photos, selected) { MediaGrid(it, selected, 3, ::toggle) }
                 2 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(videos, selected) { MediaGrid(it, selected, 3, ::toggle) }
                 3 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(music, selected) { MusicList(it, selected, ::toggle) }
-                else -> FilesTab(docs, selected, ::toggle, onFiles = { filePicker.launch(arrayOf("*/*")) }, onFolder = { folderPicker.launch(null) })
+                else -> FilesTab(docs, selected, ::toggle, onFiles = { filePicker.launch(arrayOf("*/*")) }, onFolder = { folderPicker.launch(null) }, onText = { writing = true }, onPaste = ::paste)
             }
         }
         SelectionBar(selected, adding, onOpen = { showSelection = true }, onSend = onSend)
@@ -299,7 +349,10 @@ private fun AppsGrid(apps: List<Entity>?, selected: Map<String, Entity>, toggle:
     }
 }
 
-private val gridThumbs = LruCache<String, Bitmap>(150)
+/** Sized in bytes, not entries: 150 thumbnails at 256 px would pin ~38 MB on a low-RAM phone. */
+private val gridThumbs = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+    override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
+}
 
 @Composable
 private fun MediaGrid(list: List<Entity>?, selected: Map<String, Entity>, cols: Int, toggle: (Entity) -> Unit) {
@@ -373,13 +426,19 @@ private fun MusicList(list: List<Entity>?, selected: Map<String, Entity>, toggle
 @Composable
 private fun FilesTab(
     docs: List<Entity>, selected: Map<String, Entity>, toggle: (Entity) -> Unit,
-    onFiles: () -> Unit, onFolder: () -> Unit,
+    onFiles: () -> Unit, onFolder: () -> Unit, onText: () -> Unit, onPaste: () -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 BigButton(Icons.Outlined.FileOpen, "Browse files", Modifier.weight(1f), onFiles)
                 BigButton(Icons.Outlined.CreateNewFolder, "Send a folder", Modifier.weight(1f), onFolder)
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                BigButton(Icons.Outlined.EditNote, "Write text", Modifier.weight(1f), onText)
+                BigButton(Icons.Outlined.ContentPaste, "Paste clipboard", Modifier.weight(1f), onPaste)
             }
         }
         if (docs.isNotEmpty()) {
@@ -392,6 +451,7 @@ private fun FilesTab(
                             FileRow(
                                 name = e.label, mime = e.mime, uri = e.thumb, meta = metaOf(e),
                                 progress = null, done = false, actions = emptyList(),
+                                thumbName = e.parts.singleOrNull()?.takeIf { it.text != null }?.name ?: e.label,
                             )
                         }
                         CheckMark(on, false)

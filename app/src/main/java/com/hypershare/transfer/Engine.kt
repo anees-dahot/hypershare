@@ -9,6 +9,9 @@ import com.hypershare.data.Partial
 import com.hypershare.data.Partials
 import com.hypershare.data.Picked
 import com.hypershare.data.Prefs
+import com.hypershare.data.TEXT_GROUP
+import com.hypershare.data.TEXT_MAX
+import com.hypershare.data.Trust
 import com.hypershare.p2p.Invite
 import com.hypershare.p2p.P2p
 import com.hypershare.p2p.groupFreq
@@ -61,6 +64,8 @@ data class FileItem(
     val status: FStatus = FStatus.Queued,
     /** Continued from an earlier, interrupted transfer. */
     val resumed: Boolean = false,
+    /** A text snippet: its content (outgoing: always; incoming: once received). */
+    val text: String? = null,
 )
 
 data class UiState(
@@ -96,6 +101,8 @@ data class UiState(
     val peer: String? = null,
     /** Receiver: a phone found us nearby and asks to connect (needs Accept). */
     val request: String? = null,
+    /** The asking phone can be remembered ("Always accept from this phone"). */
+    val requestTrust: Boolean = false,
     /** Sender: the transfer broke with files left; "Try again" can resume them. */
     val canRetry: Boolean = false,
     /** Receiver: advertising to nearby phones (Wi-Fi Direct mode). */
@@ -127,7 +134,11 @@ private class Track(
 
     @Synchronized fun source(): Source = src ?: Source.open(ctx, pick!!).also { src = it }
     @Synchronized fun closeSource() { src?.close(); src = null }
-    @Synchronized fun openSink(): Sink = sink ?: Sink.open(ctx, name, mime).also { sink = it }
+    /** Small text snippets stay in memory and are shown; everything else is saved. */
+    val isText get() = group == TEXT_GROUP && size <= TEXT_MAX
+    @Synchronized fun openSink(): Sink =
+        sink ?: (if (isText) Sink.memory(ctx, size.toInt()) else Sink.open(ctx, name, mime)).also { sink = it }
+    val text: String? get() = if (outgoing) pick?.text else sink?.text
 }
 
 private fun chunkLen(size: Long, ci: Int) = min(Proto.CHUNK.toLong(), size - ci.toLong() * Proto.CHUNK).toInt()
@@ -144,6 +155,8 @@ private class Session(val ctx: Context, val role: Role, val bench: Boolean, val 
     val added = Channel<List<IntArray>>(Channel.UNLIMITED)
     val addLock = Mutex()
     @Volatile var decision = CompletableDeferred<Boolean>()
+    /** Receiver ticked "Always accept from this phone" on the request it just accepted. */
+    @Volatile var trust = false
     @Volatile var dout: DataOutputStream? = null
     @Volatile var ending = false
     @Volatile var cancelled = false
@@ -158,7 +171,17 @@ private class Session(val ctx: Context, val role: Role, val bench: Boolean, val 
         synchronized(o) { o.writeByte(type); o.body(); o.flush() }
     }
 
-    fun fail(e: Throwable) { if (!ending) end.completeExceptionally(e) }
+    /**
+     * Something broke on this phone (storage full, corrupted data…). Tell the peer and close the
+     * sockets: the loops sit in blocking reads that cancellation can't interrupt, so without this
+     * both phones would hang on "Transferring" forever.
+     */
+    fun fail(e: Throwable) {
+        if (ending || !end.completeExceptionally(e)) return
+        runCatching { msg(Proto.T_BYE) }
+        queue.close()
+        open.forEach { runCatching { it.close() } }
+    }
 
     /** Local end: user tapped Finish/Done (graceful) or Cancel. Tells the peer, then tears down. */
     fun close(userCancel: Boolean) {
@@ -224,6 +247,7 @@ private class Session(val ctx: Context, val role: Role, val bench: Boolean, val 
 /** App-wide transfer state machine. One session at a time. */
 object Engine {
     const val CHART_POINTS = 120
+    private const val HISTORY_TEXT = 8_000
 
     val state = MutableStateFlow(UiState())
 
@@ -260,7 +284,8 @@ object Engine {
     /** Either phone: queue more files on the open session. */
     fun addFiles(items: List<Picked>) {
         val s = sess ?: return
-        if (s.ending || items.isEmpty()) return
+        // Not linked yet: there is nobody to answer, and waiting for one would time the session out.
+        if (s.ending || s.dout == null || items.isEmpty()) return
         scope.launch { try { addOut(s, items) } catch (e: Throwable) { s.fail(e) } }
     }
 
@@ -271,7 +296,11 @@ object Engine {
     }
 
     /** Receiver: answer a nearby connection request. */
-    fun respond(accept: Boolean) { sess?.decision?.complete(accept) }
+    fun respond(accept: Boolean, always: Boolean = false) {
+        val s = sess ?: return
+        s.trust = accept && always
+        s.decision.complete(accept)
+    }
 
     /** Files that didn't make it in the last failed send, to try again (the receiver resumes partials). */
     fun retryItems(): List<Picked> = last?.outs?.filter { !it.done && !it.skipped }?.mapNotNull { it.pick }.orEmpty()
@@ -279,17 +308,21 @@ object Engine {
     /** Stop now; stays on screen showing what happened (or goes home if nothing was sent yet). */
     fun cancel() {
         val s = sess ?: return
-        if (state.value.phase == Phase.Waiting || state.value.phase == Phase.Preparing) { reset(); return }
+        // Not linked yet (starting Wi-Fi, waiting, joining): nothing was sent, so just stop and go home.
+        if (s.dout == null) { reset(); return }
         scope.launch { s.close(userCancel = true) }
     }
 
     /** Leave the transfer screen: ends the session (tells the other phone) and returns home. */
     fun reset() {
         val s = sess
+        val j = job
         sess = null
         gen++
         state.value = UiState()
-        if (s != null) scope.launch { s.close(userCancel = true) } else job?.cancel()
+        // Close first (records the cancel, says BYE), then stop the job: while still joining there are
+        // no sockets to close, and the join would otherwise keep retrying for up to a minute.
+        if (s != null) scope.launch { s.close(userCancel = true); j?.cancel() } else j?.cancel()
     }
 
     private fun run(ctx: Context, role: Role, bench: Boolean, viaQr: Boolean, block: suspend CoroutineScope.(Session) -> Unit) {
@@ -329,7 +362,9 @@ object Engine {
                 val doneFiles = s.all.filter { it.done && it.name != Proto.BENCH_NAME }
                 if (doneFiles.isNotEmpty()) History.add(app, doneFiles.sortedBy { it.seq }.map {
                     HistoryItem(if (it.outgoing) "Send" else "Receive", it.name.substringAfterLast('/'), it.size, it.mime,
-                        (it.sink?.readyUri ?: it.uri)?.toString(), System.currentTimeMillis())
+                        (it.sink?.readyUri ?: it.uri)?.toString(), System.currentTimeMillis(),
+                        // Kept so it can be copied again later; capped so history stays small.
+                        it.text?.take(HISTORY_TEXT))
                 })
             }
         }
@@ -365,7 +400,12 @@ object Engine {
 
     private fun linkLabel(type: Char, freq: Int) =
         (if (type == Invite.LAN) "LAN (debug)" else "Wi-Fi Direct") +
-            when { freq <= 0 -> ""; freq < 5000 -> " · 2.4 GHz"; else -> " · 5 GHz ch ${(freq - 5000) / 5}" }
+            when {
+                freq <= 0 -> ""
+                freq < 5000 -> " · 2.4 GHz"
+                freq < 5925 -> " · 5 GHz ch ${(freq - 5000) / 5}"
+                else -> " · 6 GHz ch ${(freq - 5950) / 5}"
+            }
 
     // ---------------------------------------------------------------- receiver (shows the code)
 
@@ -397,17 +437,31 @@ object Engine {
             val ctrl = s.keep(runInterruptible { ctrlServer.accept() }).apply { tcpNoDelay = true }
             val din = DataInputStream(BufferedInputStream(ctrl.getInputStream()))
             val dout = DataOutputStream(BufferedOutputStream(ctrl.getOutputStream()))
-            if (din.readInt() != Proto.MAGIC) throw IOException("The other phone runs a different HyperShare version. Update both.")
-            val streams = din.readInt().coerceIn(1, 16)
-            val peer = din.readUTF().ifBlank { "Another phone" }
+            // A connection that says nothing, or drops mid-hello (sender cancelled), must not end the
+            // session or keep the next phone waiting.
+            val magic = try { ctrl.soTimeout = 8_000; din.readInt() } catch (e: IOException) {
+                if (s.ending) throw e
+                runCatching { ctrl.close() }; continue
+            }
+            if (magic != Proto.MAGIC) throw IOException("The other phone runs a different HyperShare version. Update both.")
+            val hello = try { Triple(din.readInt().coerceIn(1, 16), din.readUTF().ifBlank { "Another phone" }, din.readUTF()) } catch (e: IOException) {
+                if (s.ending) throw e
+                runCatching { ctrl.close() }; continue
+            }
+            ctrl.soTimeout = 0
+            val (streams, peer, token) = hello
             // Only the QR code carries the token: anyone else (nearby list, typed code) needs Accept.
-            val viaQr = din.readUTF().let { it.isNotEmpty() && it == inv.token }
-            if (!viaQr) {
+            val viaQr = token.isNotEmpty() && token == inv.token
+            // A phone we chose to always accept proves it with a secret we gave it (see Trust).
+            val canTrust = token.startsWith(Trust.PREFIX)
+            val trusted = !viaQr && canTrust && Trust.accepts(ctx, token, inv.ssid)
+            s.trust = false
+            if (!viaQr && !trusted) {
                 // Found via the nearby list, not by scanning our code: ask first.
                 s.decision = CompletableDeferred()
-                set(s.gen) { it.copy(request = peer) }
+                set(s.gen) { it.copy(request = peer, requestTrust = canTrust) }
                 val ok = withTimeoutOrNull(60_000) { s.decision.await() } ?: false
-                set(s.gen) { it.copy(request = null) }
+                set(s.gen) { it.copy(request = null, requestTrust = false) }
                 if (!ok) {
                     runCatching { dout.writeByte(0); dout.flush(); ctrl.close() }
                     continue
@@ -415,14 +469,17 @@ object Engine {
             }
             dout.writeByte(1); dout.writeUTF(me); dout.flush()
             s.dout = dout
+            if (s.trust) runCatching { val key = Trust.remember(ctx, peer); s.msg(Proto.T_TRUST) { writeUTF(key) } }
             advert?.cancel(); p2p?.stopAdvertising()
             set(s.gen) { it.copy(phase = Phase.Connecting, qr = null, code = null, connected = true, peer = peer, discoverable = false) }
 
             launch {
-                repeat(streams) {
-                    val sc = s.keep(dataServer.accept()).also { tune(it) }
-                    launch { guard(s) { recvLoop(sc, s) } }
-                    launch { guard(s) { sendLoop(sc, s) } }
+                guard(s) {
+                    repeat(streams) {
+                        val sc = s.keep(dataServer.accept()).also { tune(it) }
+                        launch { guard(s) { recvLoop(sc, s) } }
+                        launch { guard(s) { sendLoop(sc, s) } }
+                    }
                 }
             }
             launch { guard(s) { control(din, s) } }
@@ -477,7 +534,7 @@ object Engine {
         val din = DataInputStream(BufferedInputStream(ctrl.getInputStream()))
         val dout = DataOutputStream(BufferedOutputStream(ctrl.getOutputStream()))
         val streams = Prefs.streams(ctx)
-        dout.writeInt(Proto.MAGIC); dout.writeInt(streams); dout.writeUTF(Prefs.deviceName(ctx)); dout.writeUTF(if (s.viaQr) inv.token else ""); dout.flush()
+        dout.writeInt(Proto.MAGIC); dout.writeInt(streams); dout.writeUTF(Prefs.deviceName(ctx)); dout.writeUTF(if (s.viaQr) inv.token else Trust.token(ctx, inv.ssid)); dout.flush()
         if (!s.viaQr) set(s.gen) { it.copy(step = "Waiting for ${inv.name.ifBlank { "the receiver" }} to accept…") }
         if (din.readByte().toInt() != 1) throw IOException("${inv.name.ifBlank { "The receiver" }} declined the transfer.")
         val peer = din.readUTF()
@@ -533,11 +590,15 @@ object Engine {
     private fun control(din: DataInputStream, s: Session) {
         while (true) {
             val type = try { din.readByte().toInt() } catch (e: IOException) {
+                if (s.end.isCompleted) return // we closed the sockets ourselves (fail / close)
                 if (!s.pending) { s.peerGone(); return } else throw e
             }
             when (type) {
                 Proto.T_ADD -> {
-                    val metas = List(din.readInt()) { Meta(din.readUTF(), din.readLong(), din.readUTF(), din.readUTF()) }
+                    val n = din.readInt()
+                    if (n !in 0..MAX_BATCH) throw IOException("Bad data from the other phone")
+                    val metas = List(n) { Meta(din.readUTF(), din.readLong(), din.readUTF(), din.readUTF()) }
+                    if (metas.any { it.size < 0 }) throw IOException("Bad data from the other phone")
                     val base = s.ins.size
                     val new = metas.mapIndexed { i, m ->
                         // Same name + size stopped half-way earlier? Continue that file.
@@ -560,7 +621,12 @@ object Engine {
                 }
                 Proto.T_ADDED -> {
                     val n = din.readInt()
-                    s.added.trySend(List(n) { IntArray(din.readInt()) { din.readInt() } })
+                    if (n !in 0..MAX_BATCH) throw IOException("Bad data from the other phone")
+                    s.added.trySend(List(n) {
+                        val have = din.readInt()
+                        if (have !in 0..MAX_CHUNKS) throw IOException("Bad data from the other phone")
+                        IntArray(have) { din.readInt() }
+                    })
                 }
                 Proto.T_FILE_DONE -> {
                     s.outs.getOrNull(din.readInt())?.done = true
@@ -569,6 +635,7 @@ object Engine {
                 }
                 Proto.T_SKIP_MINE -> s.skipIn(din.readInt(), tell = false)
                 Proto.T_SKIP_YOURS -> s.skipOut(din.readInt(), tell = false)
+                Proto.T_TRUST -> Trust.keep(s.ctx, din.readUTF())
                 Proto.T_BYE -> { s.peerGone(); return }
                 else -> throw IOException("Unknown message from the other phone")
             }
@@ -582,6 +649,10 @@ object Engine {
      * pay for the idle direction.
      */
     private const val DEPTH = 3
+
+    /** Sanity limits on counts read from the other phone, so a broken peer can't make us allocate gigabytes. */
+    private const val MAX_BATCH = 500_000
+    private const val MAX_CHUNKS = 1 shl 20 // 4 TB per file at 4 MiB chunks
 
     private class Buffers {
         private val pool = Channel<ByteBuffer>(DEPTH)
@@ -618,7 +689,7 @@ object Engine {
                 if (idx < 0) break
                 val off = hdr.long; val len = hdr.int; val sum = hdr.int
                 val t = s.ins.getOrNull(idx)
-                if (t == null || len !in 1..Proto.CHUNK) throw IOException("Bad data from the other phone")
+                if (t == null || len !in 1..Proto.CHUNK || off < 0 || off > t.size - len) throw IOException("Bad data from the other phone")
                 val buf = bufs.take()
                 buf.clear(); buf.limit(len); readFully(sc, buf); buf.flip()
                 filled.send(InChunk(buf, t, off, len, sum))
@@ -630,7 +701,7 @@ object Engine {
 
     private fun store(c: InChunk, s: Session, crc: CRC32) {
         val t = c.t
-        if (t.skipped) return // in flight when cancelled: drop it
+        if (t.skipped || t.done) return // in flight when cancelled, or a repeat of a finished file: drop it
         crc.reset(); crc.update(c.buf); c.buf.rewind()
         if (crc.value.toInt() != c.sum) throw IOException("Corrupted data (checksum mismatch)")
         try { t.openSink().write(c.buf, c.off) } catch (e: IOException) { if (t.skipped) return else throw e }
@@ -653,11 +724,15 @@ object Engine {
                     if (t.skipped) { if (t.chunksLeft.decrementAndGet() <= 0) t.closeSource(); continue }
                     val buf = bufs.take()
                     buf.clear(); buf.limit(c.len)
-                    try { t.source().read(buf, c.off) } catch (e: IOException) {
+                    // Exception, not just IOException: providers also throw SecurityException (access
+                    // revoked) or IllegalStateException (cloud file gone) when opening.
+                    try { t.source().read(buf, c.off) } catch (e: Exception) {
                         bufs.give(buf)
                         if (s.ending) throw e
                         // File vanished or became unreadable: drop just this file, keep the session going.
-                        s.skipOut(t.idx, tell = true); t.chunksLeft.decrementAndGet(); continue
+                        s.skipOut(t.idx, tell = true)
+                        if (t.chunksLeft.decrementAndGet() <= 0) t.closeSource()
+                        continue
                     }
                     buf.flip()
                     crc.reset(); crc.update(buf); buf.rewind()
@@ -726,6 +801,7 @@ object Engine {
             done = min(t.got.get(), t.size),
             status = when { t.skipped -> FStatus.Skipped; t.done -> FStatus.Done; t.got.get() > 0 -> FStatus.Active; else -> FStatus.Queued },
             resumed = t.resumed,
+            text = t.text,
         )
     }
 

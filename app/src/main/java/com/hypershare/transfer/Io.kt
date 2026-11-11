@@ -7,6 +7,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import com.hypershare.data.Picked
+import com.hypershare.data.Prefs
 import java.io.EOFException
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -34,6 +35,8 @@ object Proto {
     const val T_SKIP_MINE = 4  // "I cancelled my outgoing file idx"
     const val T_BYE = 5        // session over
     const val T_SKIP_YOURS = 6 // "stop sending me your file idx"
+    const val T_TRUST = 7      // receiver -> sender: "I'll accept you without asking from now on", + secret.
+                               // Only sent to senders whose hello shows they understand it.
 
     fun benchItem() = Picked(Uri.EMPTY, BENCH_NAME, BENCH_SIZE, "application/octet-stream")
 }
@@ -74,9 +77,17 @@ fun writeFully(sc: SocketChannel, vararg bs: ByteBuffer) {
 }
 
 /** A file being sent. Bench source sends a zeroed buffer without touching storage. */
-class Source private constructor(private val pfd: ParcelFileDescriptor?, private val ch: FileChannel?) {
+class Source private constructor(
+    private val pfd: ParcelFileDescriptor?, private val ch: FileChannel?,
+    /** A text snippet: sent straight from memory. */
+    private val bytes: ByteArray? = null,
+) {
     /** Fill [b] (position..limit) from file offset [pos]. Thread-safe (positional read). */
     fun read(b: ByteBuffer, pos: Long) {
+        if (bytes != null) {
+            if (pos < 0 || pos + b.remaining() > bytes.size) throw EOFException("Text is shorter than announced")
+            b.put(bytes, pos.toInt(), b.remaining()); return
+        }
         if (ch == null) { b.position(b.limit()); return }
         var p = pos
         while (b.hasRemaining()) {
@@ -91,6 +102,7 @@ class Source private constructor(private val pfd: ParcelFileDescriptor?, private
     companion object {
         fun open(ctx: Context, p: Picked): Source {
             if (p.name == Proto.BENCH_NAME) return Source(null, null)
+            p.text?.let { return Source(null, null, it.toByteArray()) }
             val pfd = ctx.contentResolver.openFileDescriptor(p.uri, "r") ?: throw IOException("Can't open ${p.name}")
             return Source(pfd, FileInputStream(pfd.fileDescriptor).channel)
         }
@@ -103,6 +115,8 @@ class Sink private constructor(
     private val pfd: ParcelFileDescriptor?, private val ch: FileChannel?,
     /** Android 8–9 only: the file written directly in Download/HyperShare. */
     private val file: java.io.File? = null,
+    /** A text snippet: kept in memory and shown, never written to storage. */
+    private val mem: ByteArray? = null,
 ) {
     @Volatile private var finished = false
     @Volatile private var aborted = false
@@ -122,8 +136,17 @@ class Sink private constructor(
         androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", it)
     }
 
+    /** The received text snippet, once complete. */
+    val text: String? get() = if (finished && mem != null) decoded ?: String(mem).also { decoded = it } else null
+    @Volatile private var decoded: String? = null
+
     /** Thread-safe positional write. */
     fun write(b: ByteBuffer, pos: Long) {
+        if (mem != null) {
+            if (aborted) throw IOException("File closed")
+            if (pos < 0 || pos + b.remaining() > mem.size) throw IOException("Bad data from the other phone")
+            b.get(mem, pos.toInt(), b.remaining()); return // streams write disjoint ranges
+        }
         if (ch == null) return // speed test: discard
         // Must not look like success: the caller would mark the chunk as saved, and a later
         // resume would skip data that never reached the file.
@@ -136,7 +159,7 @@ class Sink private constructor(
         if (finished || aborted) return
         ch?.close(); pfd?.close()
         uri?.let { ctx.contentResolver.update(it, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null) }
-        file?.let { android.media.MediaScannerConnection.scanFile(ctx, arrayOf(it.path), null, null) }
+        file?.let { runCatching { android.media.MediaScannerConnection.scanFile(ctx, arrayOf(it.path), null, null) } }
         finished = true
     }
 
@@ -150,23 +173,57 @@ class Sink private constructor(
     }
 
     companion object {
+        /** In-memory sink for a text snippet of [size] bytes. */
+        fun memory(ctx: Context, size: Int) = Sink(ctx, null, null, null, null, ByteArray(size))
+
+        /**
+         * With "save to gallery" on, loose photos and videos go to Pictures/ or Movies/HyperShare,
+         * where gallery apps look. Files sent inside a folder stay together in Downloads.
+         */
+        private fun galleryDir(ctx: Context, mime: String, dirs: String): String? = when {
+            dirs.isNotEmpty() || !Prefs.gallery(ctx) -> null
+            mime.startsWith("image/") -> Environment.DIRECTORY_PICTURES
+            mime.startsWith("video/") -> Environment.DIRECTORY_MOVIES
+            else -> null
+        }
+
         fun open(ctx: Context, name: String, mime: String): Sink {
             if (name == Proto.BENCH_NAME) return Sink(ctx, null, null, null)
             val parts = name.split('/').map { it.trim() }.filter { it.isNotEmpty() && it != "." && it != ".." }
             val file = parts.lastOrNull() ?: "file"
             val dirs = parts.dropLast(1).joinToString("/")
-            if (android.os.Build.VERSION.SDK_INT < 29) return openLegacy(ctx, file, dirs)
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, file)
-                put(MediaStore.Downloads.MIME_TYPE, mime)
-                put(MediaStore.Downloads.RELATIVE_PATH,
-                    Environment.DIRECTORY_DOWNLOADS + "/HyperShare" + if (dirs.isNotEmpty()) "/$dirs" else "")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
+            val media = galleryDir(ctx, mime, dirs)
+            if (android.os.Build.VERSION.SDK_INT < 29) return openLegacy(ctx, file, dirs, media ?: Environment.DIRECTORY_DOWNLOADS)
             val cr = ctx.contentResolver
-            val uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw IOException("Can't create $file")
-            val pfd = cr.openFileDescriptor(uri, "rw") ?: throw IOException("Can't write $file")
+            fun insert(coll: Uri, root: String, n: String) = runCatching {
+                cr.insert(coll, ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, n)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, root + "/HyperShare" + if (dirs.isNotEmpty()) "/$dirs" else "")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                })
+            }.getOrNull()
+            val downloads = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            // Gallery first; it refuses types it doesn't know (then Downloads takes the file).
+            // MediaStore renames duplicates itself, but gives up (throws) after ~32 files with one
+            // name. Then use a name of our own, so one clash doesn't fail the whole transfer.
+            val uri = media?.let {
+                insert(if (it == Environment.DIRECTORY_PICTURES) MediaStore.Images.Media.EXTERNAL_CONTENT_URI else MediaStore.Video.Media.EXTERNAL_CONTENT_URI, it, file)
+            } ?: insert(downloads, Environment.DIRECTORY_DOWNLOADS, file)
+                ?: insert(downloads, Environment.DIRECTORY_DOWNLOADS, uniqueName(file))
+                ?: throw IOException("Can't create $file")
+            val pfd = try { cr.openFileDescriptor(uri, "rw") } catch (e: Exception) { null }
+            if (pfd == null) {
+                runCatching { cr.delete(uri, null, null) } // don't leave an empty pending entry behind
+                throw IOException("Can't write $file")
+            }
             return Sink(ctx, uri, pfd, FileOutputStream(pfd.fileDescriptor).channel)
+        }
+
+        private fun uniqueName(name: String): String {
+            val tag = java.lang.Long.toString(System.currentTimeMillis(), 36)
+            val ext = name.substringAfterLast('.', "")
+            return if (ext.isEmpty() || ext.length > 8) "$name $tag" else "${name.substringBeforeLast('.')} $tag.$ext"
         }
     
         /** Reopen a partial file kept by [closeKeep]; null if it's gone. */
@@ -183,8 +240,8 @@ class Sink private constructor(
         }.getOrNull()
 
         @Suppress("DEPRECATION")
-        private fun openLegacy(ctx: Context, name: String, dirs: String): Sink {
-            val root = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "HyperShare")
+        private fun openLegacy(ctx: Context, name: String, dirs: String, publicDir: String): Sink {
+            val root = java.io.File(Environment.getExternalStoragePublicDirectory(publicDir), "HyperShare")
             val dir = if (dirs.isEmpty()) root else java.io.File(root, dirs)
             if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Can't create ${dir.path}. Allow storage access.")
             val stem = name.substringBeforeLast('.', name); val ext = name.substringAfterLast('.', "")

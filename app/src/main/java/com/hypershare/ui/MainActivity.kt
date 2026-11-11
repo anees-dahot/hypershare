@@ -1,5 +1,9 @@
 package com.hypershare.ui
 
+import com.hypershare.data.Trust
+import com.hypershare.data.textEntity
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.rememberScrollState
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
@@ -118,7 +122,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        History.load(this)
+        History.load(this); Trust.load(this)
         Prefs.load(this)
         onboarded = Prefs.onboarded(this)
         lifecycleScope.launch { Updater.check() }
@@ -250,10 +254,17 @@ class MainActivity : ComponentActivity() {
             android.content.Intent.ACTION_SEND -> listOfNotNull(i.getParcelableExtra(android.content.Intent.EXTRA_STREAM))
             else -> i.getParcelableArrayListExtra<android.net.Uri>(android.content.Intent.EXTRA_STREAM).orEmpty()
         }
-        if (uris.isEmpty()) return
+        // A link or note shared from a browser or notes app has no file: it goes as a text snippet.
+        val text = if (uris.isEmpty()) i.getCharSequenceExtra(android.content.Intent.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() } else null
+        if (uris.isEmpty() && text == null) return
         i.action = null // handle once
         lifecycleScope.launch {
-            val ents = MediaRepo.documents(this@MainActivity, uris)
+            val ents = if (text != null) listOf(textEntity(text))
+                else runCatching { MediaRepo.documents(this@MainActivity, uris) }.getOrDefault(emptyList())
+            if (ents.isEmpty()) {
+                android.widget.Toast.makeText(this@MainActivity, "Couldn't read what was shared", android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
             if (Engine.state.value.connected) { Engine.addFiles(ents.flatMap { it.parts }); return@launch }
             selected.clear(); ents.forEach { selected[it.key] = it }
             pendingItems = ents.flatMap { it.parts }; pendingBench = false
@@ -265,7 +276,9 @@ class MainActivity : ComponentActivity() {
     /**
      * Debug builds only: drive a transfer over the existing network without Wi-Fi Direct, for emulator tests.
      *   am start -n com.hypershare/.ui.MainActivity --ez debug_receive_lan true
-     *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX4|L|-|-|0|0|10.0.2.2|Emu' [--ez debug_bench true]
+     *   am start -n com.hypershare/.ui.MainActivity --es debug_send_qr 'HSX5|L|-|-|0|10.0.2.2|Emu|token' [--ez debug_bench true]
+     *     [--es debug_text 'hello'] sends a text snippet instead of all photos and videos;
+     *     [--ez debug_nearby true] connects like a phone picked from the Nearby list (no QR token).
      */
     private fun debugHook(i: android.content.Intent) {
         if (i.getBooleanExtra("debug_fgs_race", false)) {
@@ -278,8 +291,12 @@ class MainActivity : ComponentActivity() {
         val qr = i.getStringExtra("debug_send_qr") ?: return
         val bench = i.getBooleanExtra("debug_bench", false)
         lifecycleScope.launch {
-            val items = if (bench) emptyList() else
-                (MediaRepo.media(this@MainActivity, MediaKind.Photos) + MediaRepo.media(this@MainActivity, MediaKind.Videos)).flatMap { it.parts }
+            val text = i.getStringExtra("debug_text")
+            val items = when {
+                bench -> emptyList()
+                text != null -> textEntity(text).parts
+                else -> (MediaRepo.media(this@MainActivity, MediaKind.Photos) + MediaRepo.media(this@MainActivity, MediaKind.Videos)).flatMap { it.parts }
+            }
             picking = false
             Engine.startSend(this@MainActivity, items, qr, bench, viaQr = !i.getBooleanExtra("debug_nearby", false))
         }
@@ -303,7 +320,7 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
     val update by Updater.ui.collectAsStateWithLifecycle()
 
     ModalBottomSheet(onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
-        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             Text("Settings", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(20.dp))
 
@@ -329,6 +346,36 @@ private fun SettingsSheet(onDismiss: () -> Unit) {
                         onClick = { Prefs.setStreams(ctx, n) },
                         shape = SegmentedButtonDefaults.itemShape(i, Prefs.STREAM_CHOICES.size),
                     ) { Text("$n") }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+            var gallery by remember { mutableStateOf(Prefs.gallery(ctx)) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Save photos and videos to gallery", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Received photos and videos show up in your gallery's HyperShare album. Off: everything stays in Downloads/HyperShare.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(gallery, { gallery = it; Prefs.setGallery(ctx, it) })
+            }
+
+            val trusted by Trust.phones.collectAsStateWithLifecycle()
+            if (trusted.isNotEmpty()) {
+                Spacer(Modifier.height(20.dp))
+                Text("Always accepted phones", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "These can send to you from their Nearby list without asking first.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                trusted.forEach { t ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(t.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                        TextButton({ Trust.forget(ctx, t.key) }) { Text("Remove") }
+                    }
                 }
             }
 

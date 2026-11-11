@@ -1,5 +1,10 @@
 package com.hypershare.ui
 
+import androidx.compose.material.icons.outlined.ContentCopy
+import com.hypershare.data.textTitle
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -49,6 +54,8 @@ fun HomeScreen(
     onSettings: () -> Unit,
 ) {
     val ctx = LocalContext.current
+    var viewing by remember { mutableStateOf<String?>(null) }
+    viewing?.let { TextDialog(it) { viewing = null } }
     val scope = rememberCoroutineScope()
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
@@ -116,7 +123,15 @@ fun HomeScreen(
                     recent.forEachIndexed { i, h ->
                         val uri = h.uri?.let(Uri::parse)
                         val sent = h.role == "Send"
-                        FileRow(
+                        val text = h.text
+                        if (text != null) FileRow(
+                            name = textTitle(text), mime = h.mime, uri = null,
+                            meta = "${if (sent) "Sent" else "Received"} · ${if (linkIn(text) != null) "Link" else "Text"} · ${fmtAgo(h.time)}",
+                            progress = null, done = false,
+                            actions = listOf(RowAction(Icons.Outlined.ContentCopy, "Copy") { copyText(ctx, text) }),
+                            thumbName = h.name,
+                            onClick = { viewing = text },
+                        ) else FileRow(
                             name = h.name, mime = h.mime, uri = uri,
                             meta = "${if (sent) "Sent" else "Received"} · ${fmtBytes(h.size)} · ${fmtAgo(h.time)}",
                             progress = null, done = false,

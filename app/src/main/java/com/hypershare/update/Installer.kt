@@ -18,6 +18,13 @@ object Installer {
             if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
         }
         val id = pi.createSession(params)
+        try { write(ctx, pi, id, parts, selfUpdate) } catch (e: Throwable) {
+            runCatching { pi.abandonSession(id) } // don't leave a half-written session (and its copy of the APK) behind
+            throw e
+        }
+    }
+
+    private fun write(ctx: Context, pi: PackageInstaller, id: Int, parts: List<Uri>, selfUpdate: Boolean) {
         pi.openSession(id).use { s ->
             parts.forEachIndexed { i, uri ->
                 val input = ctx.contentResolver.openInputStream(uri) ?: error("Can't read APK")

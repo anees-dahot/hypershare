@@ -2,4 +2,6 @@
 <!-- Android 8–9: received files live in Download/HyperShare and are shared via FileProvider. -->
 <paths>
     <external-path name="downloads" path="Download/HyperShare/" />
+    <external-path name="pictures" path="Pictures/HyperShare/" />
+    <external-path name="movies" path="Movies/HyperShare/" />
 </paths>

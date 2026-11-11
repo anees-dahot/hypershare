@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
@@ -52,7 +53,7 @@ class TransferService : Service() {
         nm.createNotificationChannel(NotificationChannel(CH, "Transfers", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CH_DONE, "Finished transfers", NotificationManager.IMPORTANCE_DEFAULT))
         val n = build(Engine.state.value)
-        if (Build.VERSION.SDK_INT >= 29) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        if (Build.VERSION.SDK_INT >= 29) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         else startForeground(ID, n)
 
         if (intent?.action == ACTION_CANCEL) Engine.cancel()
@@ -72,8 +73,11 @@ class TransferService : Service() {
                 .apply { setReferenceCounted(false); acquire(3 * 60 * 60 * 1000L) }
         }
         if (watcher == null) watcher = scope.launch {
-            launch { Engine.state.sample(800).collect { nm.notify(ID, build(it)) } }
+            val progress = launch { Engine.state.sample(800).collect { nm.notify(ID, build(it)) } }
             Engine.needService.first { !it }
+            // Stop updating first: a late sample would re-post the progress notification after the
+            // service is gone, leaving it stuck in the shade.
+            progress.cancelAndJoin()
             summary(nm, Engine.state.value)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

@@ -26,7 +26,7 @@ After that, the app updates itself: it checks GitHub Releases on launch and show
 
 1. **Phone A** (receiver): tap **Receive**. A QR code appears.
 2. **Phone B** (sender): tap **Send**, choose from the Apps, Photos, Videos, Music or Files tabs, tap **Send**, then scan the code.
-3. Files are saved on Phone A in `Downloads/HyperShare`.
+3. Files are saved on Phone A in `Downloads/HyperShare`. Photos and videos go to the gallery instead (`Pictures/HyperShare`, `Movies/HyperShare`); turn that off in Settings to keep everything in Downloads.
 
 **Test link speed** sends 2 GB of dummy data without reading or writing storage. Use it to see your phones' raw link speed.
 
@@ -43,9 +43,12 @@ The app shows the link frequency it got, along with live and average MB/s.
 ## Features
 
 - **Two ways to pair:** tap the other phone's name in the **Nearby** list (it asks the receiver to accept), or scan its QR code.
+- **Always accept:** tick "Always accept from this phone" on a request and that phone gets in without asking next time. It proves itself with a secret only the two phones hold, so a copied name doesn't work. Remove phones in Settings.
 - **Both phones can send** in one session; each side sees the other's name.
+- **Text, links and clipboard:** in the Files tab, **Write text** or **Paste clipboard**. The other phone shows it with Copy (and Open for a link) instead of saving a file. Recent texts stay in the home list.
 - **Built-in picker:** Apps (including split APKs), Photos, Videos, Music, Files and whole folders. Search, sort and Select all.
-- **Share → HyperShare** from any app.
+- **Share → HyperShare** from any app, for files and for text or links (for example a page from the browser).
+- **Photos and videos land in the gallery** (a HyperShare album). Files sent as part of a folder stay together in Downloads.
 - **Received files screen:** search, filter by type, then open, install, share or delete.
 - **Per-file control:** cancel any file. Install for APKs, Play for media, Open for the rest.
 - **Resume:** if a transfer breaks, **Try again** continues partly received files instead of restarting them.
@@ -75,8 +78,10 @@ Debug builds can run a transfer between two emulators over adb port forwarding, 
 emulator -avd <avd> -read-only -port 5560 &  emulator -avd <avd> -read-only -port 5562 &
 adb -s emulator-5560 shell am start -n com.hypershare/.ui.MainActivity --ez debug_receive_lan true
 adb -s emulator-5560 forward tcp:8988 tcp:8988 && adb -s emulator-5560 forward tcp:8989 tcp:8989
-adb -s emulator-5562 shell am start -n com.hypershare/.ui.MainActivity --es debug_send_qr "'HSX3|L|-|-|0|0|10.0.2.2'"
+adb -s emulator-5562 shell am start -n com.hypershare/.ui.MainActivity --es debug_send_qr "'HSX5|L|-|-|0|10.0.2.2|Emu|debug'"
 ```
+
+Add `--es debug_text 'hello'` to send a text snippet instead of all photos and videos, or `--ez debug_nearby true` to connect like a phone picked from the Nearby list (the receiver then asks to accept).
 
 ## Build and release
 
@@ -87,7 +92,7 @@ adb -s emulator-5562 shell am start -n com.hypershare/.ui.MainActivity --es debu
 
 The release signing key is read from `~/.hypershare/keystore.properties`, outside the repo. Back it up: if it's lost, users can't update in place anymore.
 
-Requires JDK 17 and Android SDK 36.
+Requires JDK 17 and Android SDK 37 (Gradle fetches it on first build).
 
 ## Code map
 
@@ -100,6 +105,7 @@ Requires JDK 17 and Android SDK 36.
 | `service/TransferService.kt` | Foreground service, Wi-Fi lock and wake lock |
 | `update/Updater.kt`, `Installer.kt` | Self-update from GitHub Releases; installs received APKs (incl. splits) |
 | `data/History.kt` | Recent transfers list and settings |
+| `data/Trust.kt` | "Always accept from this phone": per-pair secrets and the proof sent when connecting |
 | `ui/*.kt` | Compose screens: Home, Send review, Receive, Transfer; theme and components |
 
 ## Limitations

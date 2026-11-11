@@ -1,5 +1,9 @@
 package com.hypershare.ui
 
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import android.app.Activity
 import android.graphics.Bitmap
 import androidx.compose.animation.AnimatedContent
@@ -137,12 +141,26 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
 
     // A phone found us in its Nearby list (didn't scan the code): ask before letting it in.
     s.request?.let { peer ->
+        var always by remember(peer) { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = {},
             icon = { Avatar(peer, 48.dp) },
             title = { Text("$peer wants to send you files") },
-            text = { Text("Only accept if you know this phone. It found you in its Nearby list.") },
-            confirmButton = { Button({ Engine.respond(true) }) { Text("Accept") } },
+            text = {
+                Column {
+                    Text("Only accept if you know this phone. It found you in its Nearby list.")
+                    if (s.requestTrust) Row(
+                        Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(10.dp))
+                            .toggleable(always, role = Role.Checkbox) { always = it },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(always, null)
+                        Spacer(Modifier.width(10.dp))
+                        Text("Always accept from this phone", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = { Button({ Engine.respond(true, always) }) { Text("Accept") } },
             dismissButton = { TextButton({ Engine.respond(false) }) { Text("Decline") } },
         )
     }

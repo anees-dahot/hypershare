@@ -47,7 +47,7 @@ data class Invite(
 
         fun decode(s: String): Invite {
             val p = s.trim().split('|')
-            require(p.size == 8 && p[0] == "HSX5") {
+            require(p.size == 8 && p[0] == "HSX5" && p[1].length == 1) {
                 if (p.firstOrNull()?.startsWith("HSX") == true) "The other phone runs a different HyperShare version. Update both phones."
                 else "That's not a HyperShare code."
             }

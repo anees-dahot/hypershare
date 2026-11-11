@@ -1,5 +1,8 @@
 package com.hypershare.ui
 
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -215,7 +218,8 @@ fun Chip(text: String, warn: Boolean = false) {
 fun bandLabel(freq: Int) = when {
     freq <= 0 -> null
     freq < 5000 -> "2.4 GHz · $freq MHz"
-    else -> "5 GHz · ch ${(freq - 5000) / 5} · $freq MHz"
+    freq < 5925 -> "5 GHz · ch ${(freq - 5000) / 5} · $freq MHz"
+    else -> "6 GHz · ch ${(freq - 5950) / 5} · $freq MHz"
 }
 
 // ------------------------------------------------------------------ file row
@@ -252,6 +256,8 @@ fun FileRow(
     pkg: String? = null,
     primary: RowAction? = null,
     dim: Boolean = false,
+    /** File name the icon and type badge are based on, when [name] is a title rather than a file name (text snippets). */
+    thumbName: String = name,
     onClick: (() -> Unit)? = null,
 ) {
     Row(
@@ -261,7 +267,7 @@ fun FileRow(
             .then(if (dim) Modifier.alpha(0.5f) else Modifier),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ItemThumb(uri, mime, name, pkg)
+        ItemThumb(uri, mime, thumbName, pkg)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
@@ -382,7 +388,7 @@ fun Avatar(name: String, size: Dp = 44.dp) {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            name.trim().take(1).uppercase(Locale.getDefault()).ifEmpty { "?" },
+            name.trim().take(1).uppercase().ifEmpty { "?" },
             style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary,
         )
     }
@@ -407,4 +413,48 @@ fun EmptyState(icon: ImageVector, title: String, body: String? = null, modifier:
         }
         if (action != null) { Spacer(Modifier.height(16.dp)); action() }
     }
+}
+
+// ------------------------------------------------------------------ text snippets
+
+fun copyText(ctx: Context, text: String) {
+    val cm = ctx.getSystemService(android.content.ClipboardManager::class.java) ?: return
+    // A very long text can exceed what the system clipboard takes.
+    val ok = runCatching { cm.setPrimaryClip(android.content.ClipData.newPlainText("HyperShare", text)) }.isSuccess
+    // Android 13+ shows its own "copied" confirmation.
+    if (!ok) Toast.makeText(ctx, "Too long to copy", Toast.LENGTH_SHORT).show()
+    else if (android.os.Build.VERSION.SDK_INT < 33) Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+}
+
+/** The link, when a snippet is nothing but one web link (then it gets an "Open link" button). */
+fun linkIn(text: String): Uri? {
+    val t = text.trim()
+    if (t.length > 2000 || t.any { it.isWhitespace() }) return null
+    if (!t.startsWith("http://", true) && !t.startsWith("https://", true)) return null
+    return runCatching { Uri.parse(t) }.getOrNull()?.takeIf { !it.host.isNullOrEmpty() }
+}
+
+fun openLink(ctx: Context, uri: Uri) = launch(ctx) { Intent(Intent.ACTION_VIEW, uri) }
+
+/** A snippet in full: selectable, with Copy, and Open when it is a link. */
+@Composable
+fun TextDialog(text: String, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val link = remember(text) { linkIn(text) }
+    // Laying out hundreds of kilobytes of text would freeze the dialog; Copy still takes all of it.
+    val shown = remember(text) { if (text.length > 20_000) text.take(20_000) + "…" else text }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (link != null) "Link" else "Text") },
+        text = {
+            SelectionContainer {
+                Text(shown, Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+        confirmButton = { Button({ copyText(ctx, text); onDismiss() }) { Text("Copy") } },
+        dismissButton = {
+            if (link != null) TextButton({ openLink(ctx, link); onDismiss() }) { Text("Open link") }
+            else TextButton(onDismiss) { Text("Close") }
+        },
+    )
 }

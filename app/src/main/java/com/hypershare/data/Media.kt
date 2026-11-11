@@ -15,7 +15,29 @@ const val APK_MIME = "application/vnd.android.package-archive"
 const val DIR_MIME = "inode/directory"
 
 /** One file on the wire. [name] may contain folders ("Trip/day1/a.jpg"). [group] ties APK parts of one app together. */
-data class Picked(val uri: Uri, val name: String, val size: Long, val mime: String, val group: String = "")
+data class Picked(
+    val uri: Uri, val name: String, val size: Long, val mime: String, val group: String = "",
+    /** Set for a text snippet: it is sent from memory, there is no file behind [uri]. */
+    val text: String? = null,
+)
+
+/**
+ * [Picked.group] of a text snippet (note, link, clipboard). The other phone shows it with Copy
+ * instead of saving a file. It travels as a small ".txt", so an older HyperShare still gets it (as a file).
+ */
+const val TEXT_GROUP = "hs:text"
+/** Bigger "texts" are saved as ordinary files on the other phone. */
+const val TEXT_MAX = 256 * 1024
+
+fun textEntity(text: String): Entity {
+    val bytes = text.toByteArray()
+    val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH.mm.ss", java.util.Locale.US).format(java.util.Date())
+    val part = Picked(Uri.EMPTY, "Text $stamp.txt", bytes.size.toLong(), "text/plain", TEXT_GROUP, text)
+    return Entity("text:${text.hashCode()}:${bytes.size}", textTitle(text), part.size, "text/plain", null, null, 0, listOf(part))
+}
+
+/** One-line label for a snippet. */
+fun textTitle(text: String): String = text.trim().lineSequence().firstOrNull().orEmpty().trim().take(60).ifEmpty { "Text" }
 
 /** One selectable thing in the picker: a photo, an app (several APK parts), a folder (many files). */
 data class Entity(
@@ -89,14 +111,23 @@ object MediaRepo {
     /** Files chosen with the system picker. */
     suspend fun documents(ctx: Context, uris: List<Uri>): List<Entity> = withContext(Dispatchers.IO) {
         uris.map { uri ->
-            var name = "file"; var size = 0L
-            ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use {
-                if (it.moveToFirst()) { name = it.getString(0) ?: name; if (!it.isNull(1)) size = it.getLong(1) }
+            var name = "file"; var size = -1L
+            // Shared from another app: the provider may refuse the query or not report a size.
+            runCatching {
+                ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use {
+                    if (it.moveToFirst()) { name = it.getString(0) ?: name; if (!it.isNull(1)) size = it.getLong(1) }
+                }
             }
+            if (size <= 0) size = sizeOf(ctx, uri)
             val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
             Entity(uri.toString(), name, size, mime, uri, null, 0, listOf(Picked(uri, name, size, mime)))
         }
     }
+
+    /** Real length when the provider's metadata has none; a file sent as 0 bytes would arrive empty. */
+    private fun sizeOf(ctx: Context, uri: Uri): Long = runCatching {
+        ctx.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+    }.getOrNull()?.coerceAtLeast(0) ?: 0L
 
     /** A whole folder (system folder picker), sent with its sub-folder structure. */
     suspend fun folder(ctx: Context, tree: Uri): Entity = withContext(Dispatchers.IO) {
@@ -115,7 +146,11 @@ object MediaRepo {
                 while (c.moveToNext()) {
                     val id = c.getString(0); val name = c.getString(1) ?: continue; val mime = c.getString(2) ?: ""
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) walk(id, "$prefix$name/")
-                    else parts += Picked(DocumentsContract.buildDocumentUriUsingTree(tree, id), "$prefix$name", c.getLong(3), mime.ifEmpty { "application/octet-stream" })
+                    else {
+                        val doc = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+                        val size = if (c.isNull(3)) sizeOf(ctx, doc) else c.getLong(3)
+                        parts += Picked(doc, "$prefix$name", size, mime.ifEmpty { "application/octet-stream" })
+                    }
                 }
             }
         }

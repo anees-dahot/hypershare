@@ -3,6 +3,7 @@ package com.hypershare.data
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -13,6 +14,8 @@ data class HistoryItem(
     val mime: String,
     val uri: String?,
     val time: Long,
+    /** A text snippet (kept so it can be copied again later); null for files. */
+    val text: String? = null,
 )
 
 /** Last 50 transferred files, stored as JSON in SharedPreferences. */
@@ -30,13 +33,14 @@ object History {
                 HistoryItem(
                     o.getString("role"), o.getString("name"), o.getLong("size"), o.getString("mime"),
                     o.optString("uri").ifEmpty { null }, o.getLong("time"),
+                    o.optString("text").ifEmpty { null },
                 )
             }
         }.getOrDefault(emptyList())
     }
 
     fun add(ctx: Context, new: List<HistoryItem>) {
-        _items.value = (new.reversed() + _items.value).take(MAX)
+        _items.update { (new.reversed() + it).take(MAX) } // called from transfer threads: no lost updates
         save(ctx)
     }
 
@@ -46,7 +50,7 @@ object History {
         val a = JSONArray()
         _items.value.forEach {
             a.put(JSONObject().put("role", it.role).put("name", it.name).put("size", it.size)
-                .put("mime", it.mime).put("uri", it.uri ?: "").put("time", it.time))
+                .put("mime", it.mime).put("uri", it.uri ?: "").put("time", it.time).put("text", it.text ?: ""))
         }
         prefs(ctx).edit().putString("items", a.toString()).apply()
     }
@@ -79,6 +83,10 @@ object Prefs {
     /** Receiver: make the Wi-Fi Direct group on 2.4 GHz so 2.4 GHz-only phones can join. */
     fun only24(ctx: Context) = prefs(ctx).getBoolean("only24", false)
     fun setOnly24(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("only24", v).apply()
+
+    /** Receiver: loose photos and videos go to Pictures/Movies (so gallery apps show them) instead of Downloads. */
+    fun gallery(ctx: Context) = prefs(ctx).getBoolean("gallery", true)
+    fun setGallery(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("gallery", v).apply()
 
     fun onboarded(ctx: Context) = prefs(ctx).getBoolean("onboarded", false)
     fun setOnboarded(ctx: Context) = prefs(ctx).edit().putBoolean("onboarded", true).apply()

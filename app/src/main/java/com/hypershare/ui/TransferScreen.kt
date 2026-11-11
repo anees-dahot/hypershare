@@ -1,5 +1,9 @@
 package com.hypershare.ui
 
+import androidx.compose.material.icons.outlined.ContentCopy
+import com.hypershare.data.TEXT_GROUP
+import com.hypershare.data.textTitle
+import com.hypershare.data.Prefs
 import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
@@ -57,7 +61,8 @@ private data class Row(val key: String, val parts: List<FileItem>) {
 private fun rows(files: List<FileItem>): List<Row> {
     val out = LinkedHashMap<String, MutableList<FileItem>>()
     files.forEach { f ->
-        val k = if (f.group.isNotEmpty()) "${f.outgoing}:g:${f.group}" else "${f.outgoing}:${f.idx}"
+        // APK parts of one app share a row; text snippets share a group marker but are separate items.
+        val k = if (f.group.isNotEmpty() && f.group != TEXT_GROUP) "${f.outgoing}:g:${f.group}" else "${f.outgoing}:${f.idx}"
         out.getOrPut(k) { mutableListOf() } += f
     }
     return out.map { (k, v) -> Row(k, v) }
@@ -133,9 +138,18 @@ fun TransferScreen(s: UiState, onSendMore: () -> Unit, onRetry: () -> Unit, onCl
                 section("Receiving", incoming, s, sending = false, onInstall = ::install)
                 section("Sending", outgoing, s, sending = true, onInstall = ::install)
             }
-            if (!s.bench && incoming.any { it.status == FStatus.Done }) item {
+            val saved = incoming.filter { it.status == FStatus.Done && it.first.group != TEXT_GROUP }
+            if (!s.bench && saved.isNotEmpty()) item {
+                // Same rule as Sink.open: loose photos and videos go to the gallery when that setting is on.
+                val inGallery = if (!Prefs.gallery(ctx)) 0 else saved.count { r ->
+                    r.parts.size == 1 && !r.first.name.contains('/') && (r.first.mime.startsWith("image/") || r.first.mime.startsWith("video/"))
+                }
                 Text(
-                    "Saved in Downloads/HyperShare",
+                    when (inGallery) {
+                        0 -> "Saved in Downloads/HyperShare"
+                        saved.size -> "Saved to your gallery (HyperShare album)"
+                        else -> "Photos and videos are in your gallery (HyperShare album), other files in Downloads/HyperShare"
+                    },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
                 )
@@ -198,20 +212,24 @@ private fun ItemRow(r: Row, sending: Boolean, live: Boolean, onInstall: (Row) ->
     val pct = if (r.size > 0) r.done.toFloat() / r.size else 1f
     val pending = r.status == FStatus.Queued || r.status == FStatus.Active
     val done = r.status == FStatus.Done
-    val primary = if (!done || uri == null || sending) null else primaryAction(ctx, uri, f.mime, f.name) { onInstall(r) }
+    val isText = f.group == TEXT_GROUP
+    val text = f.text
+    var viewing by remember { mutableStateOf(false) }
+    val primary = if (isText || !done || uri == null || sending) null else primaryAction(ctx, uri, f.mime, f.name) { onInstall(r) }
     val icons = when {
         pending && live -> listOf(RowAction(Icons.Outlined.Close, "Cancel file") { r.parts.forEach { Engine.skip(it) } })
+        isText && text != null -> listOf(RowAction(Icons.Outlined.ContentCopy, "Copy") { copyText(ctx, text) })
         done && uri != null && !sending && r.parts.size == 1 -> listOf(RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, f.mime) })
         else -> emptyList()
     }
     FileRow(
-        name = r.label,
+        name = if (isText) text?.let(::textTitle) ?: "Text" else r.label,
         mime = f.mime,
         uri = if (done || sending) uri else null,
-        pkg = f.group.ifEmpty { null },
+        pkg = if (isText) null else f.group.ifEmpty { null },
         meta = buildString {
             when (r.status) {
-                FStatus.Done -> append("${fmtBytes(r.size)} · ${extOf(f.name, f.mime)}")
+                FStatus.Done -> append(if (isText) "${if (text?.let(::linkIn) != null) "Link" else "Text"} · ${fmtBytes(r.size)}" else "${fmtBytes(r.size)} · ${extOf(f.name, f.mime)}")
                 FStatus.Active -> append("${fmtBytes(r.done)} of ${fmtBytes(r.size)}")
                 FStatus.Queued -> append("${fmtBytes(r.size)} · waiting")
                 FStatus.Skipped -> append("Cancelled")
@@ -226,8 +244,14 @@ private fun ItemRow(r: Row, sending: Boolean, live: Boolean, onInstall: (Row) ->
         primary = primary,
         actions = icons,
         dim = r.status == FStatus.Skipped,
-        onClick = if (done && uri != null && !sending && kindOf(f.mime, f.name) != Kind.Apps) ({ openFile(ctx, uri, f.mime) }) else null,
+        thumbName = f.name,
+        onClick = when {
+            isText && text != null -> ({ viewing = true })
+            done && uri != null && !sending && kindOf(f.mime, f.name) != Kind.Apps -> ({ openFile(ctx, uri, f.mime) })
+            else -> null
+        },
     )
+    if (viewing && text != null) TextDialog(text) { viewing = false }
 }
 
 /** Compact live stats: big number + avg/peak on one line, short chart, one progress line. */

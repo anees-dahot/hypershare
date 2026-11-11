@@ -104,11 +104,16 @@ object Updater {
             c.setRequestProperty("User-Agent", "HyperShare-Android")
             c.connectTimeout = 10000; c.readTimeout = 20000
             val code = c.responseCode
-            if (code in 300..399 && hops++ < 5) { url = URL(url, c.getHeaderField("Location")); c.disconnect(); continue }
-            if (code != 200) throw IOException("HTTP $code")
+            if (code in 300..399 && hops++ < 5) {
+                val next = c.getHeaderField("Location"); c.disconnect()
+                url = URL(url, next ?: throw IOException("Bad redirect"))
+                if (url.protocol != "https") throw IOException("Insecure redirect")
+                continue
+            }
+            if (code != 200) { c.disconnect(); throw IOException("HTTP $code") }
             break
         }
-        val total = c.contentLengthLong.takeIf { it > 0 } ?: rel.size
+        val total = (c.contentLengthLong.takeIf { it > 0 } ?: rel.size).coerceAtLeast(1)
         c.inputStream.use { input ->
             out.outputStream().use { o ->
                 val buf = ByteArray(64 * 1024)
