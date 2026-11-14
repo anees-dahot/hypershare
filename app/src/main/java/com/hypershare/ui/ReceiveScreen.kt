@@ -106,6 +106,14 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
                         if (s.discoverable) "Visible nearby as $me" else "Shown as $me",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    val bt = androidx.compose.ui.platform.LocalContext.current
+                    val btOff by androidx.compose.runtime.produceState(false) {
+                        while (true) { value = com.hypershare.p2p.Ble.supported(bt) && !com.hypershare.p2p.Ble.on(bt); kotlinx.coroutines.delay(2_000) }
+                    }
+                    if (s.discoverable && btOff) Text(
+                        "Bluetooth is off. Turn it on to show up in Nearby faster.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                    )
                 }
                 s.link?.let { Chip(it.substringBefore(" ·"), warn = s.freqMhz in 1..4999) }
             }

@@ -12,6 +12,7 @@ import com.hypershare.data.Prefs
 import com.hypershare.data.TEXT_GROUP
 import com.hypershare.data.TEXT_MAX
 import com.hypershare.data.Trust
+import com.hypershare.p2p.Ble
 import com.hypershare.p2p.Invite
 import com.hypershare.p2p.P2p
 import com.hypershare.p2p.groupFreq
@@ -384,9 +385,17 @@ object Engine {
         }
     }
 
-    private fun friendly(e: Throwable) = when (e) {
-        is EOFException -> "Connection lost. The other phone cancelled or went out of range."
-        else -> e.message ?: e.toString()
+    private const val LOST = "Connection lost. The other phone cancelled or went out of range."
+
+    private fun friendly(e: Throwable): String {
+        val m = e.message.orEmpty()
+        return when {
+            e is EOFException || e is java.net.SocketException || e is java.nio.channels.ClosedChannelException -> LOST
+            // NIO reports a link the peer closed as a bare IOException.
+            listOf("Broken pipe", "Connection reset", "Software caused connection abort", "ETIMEDOUT", "timed out")
+                .any { m.contains(it, ignoreCase = true) } -> LOST
+            else -> e.message ?: e.toString()
+        }
     }
 
     private fun tipFor(sta: Int, grp: Int): String? = when {
@@ -431,7 +440,12 @@ object Engine {
             it.copy(phase = Phase.Waiting, qr = inv.encode(), code = codeOf(inv.ssid), freqMhz = inv.freq, link = linkLabel(inv.type, inv.freq), discoverable = p2p != null)
         }
         // Let nearby phones find us without scanning (Wi-Fi Direct only).
-        val advert = p2p?.let { p -> launch { runCatching { p.advertise(inv) } } }
+        val advert = p2p?.let { p ->
+            launch {
+                launch { runCatching { Ble.advertise(ctx, inv) } } // stops with this job, before data flows
+                runCatching { p.advertise(inv) }
+            }
+        }
 
         while (true) {
             val ctrl = s.keep(runInterruptible { ctrlServer.accept() }).apply { tcpNoDelay = true }
@@ -789,7 +803,13 @@ object Engine {
 
     /** Errors after the session is ending are just sockets closing; otherwise they fail the session. */
     private suspend fun guard(s: Session, block: suspend () -> Unit) {
-        try { block() } catch (e: CancellationException) { throw e } catch (e: Throwable) { if (!s.ending) s.fail(e) }
+        try { block() } catch (e: CancellationException) { throw e } catch (e: Throwable) {
+            // The peer closes its data sockets right after sending BYE. Give the control reader a
+            // moment to see that BYE, so a cancel/finish on the other phone ends this session
+            // normally instead of surfacing as a raw "Broken pipe".
+            if (e is IOException) withTimeoutOrNull(1_500) { while (!s.ending && !s.end.isCompleted) delay(50) }
+            if (!s.ending) s.fail(e)
+        }
     }
 
     // ---------------------------------------------------------------- progress

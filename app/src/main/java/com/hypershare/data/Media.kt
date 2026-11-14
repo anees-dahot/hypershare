@@ -49,6 +49,10 @@ data class Entity(
     val pkg: String? = null,
     val durationMs: Long = 0,
     val parts: List<Picked>,
+    /** Media only: folder it lives in, relative to storage ("DCIM/Camera"); "" for the storage root. */
+    val folder: String = "",
+    /** Media only: last modified, ms since epoch. */
+    val date: Long = 0,
 )
 
 enum class MediaKind { Photos, Videos, Music }
@@ -86,26 +90,45 @@ object MediaRepo {
             MediaKind.Music -> MediaStore.Audio.Media.getContentUri(vol)
         }
         val hasDur = kind != MediaKind.Photos
+        // Folder: RELATIVE_PATH where it exists (Android 10+), else the parent of the file path.
+        val rel = android.os.Build.VERSION.SDK_INT >= 29
+        @Suppress("DEPRECATION")
         val proj = buildList {
             add(MediaStore.MediaColumns._ID); add(MediaStore.MediaColumns.DISPLAY_NAME)
             add(MediaStore.MediaColumns.SIZE); add(MediaStore.MediaColumns.MIME_TYPE)
+            add(MediaStore.MediaColumns.DATE_MODIFIED)
+            add(if (rel) MediaStore.MediaColumns.RELATIVE_PATH else MediaStore.MediaColumns.DATA)
             if (hasDur) add(MediaStore.MediaColumns.DURATION)
         }.toTypedArray()
         val out = ArrayList<Entity>()
         runCatching {
             ctx.contentResolver.query(coll, proj, null, null, "${MediaStore.MediaColumns.DATE_MODIFIED} DESC")?.use { c ->
-                while (c.moveToNext() && out.size < 3000) {
+                while (c.moveToNext() && out.size < MAX_MEDIA) {
                     val uri = ContentUris.withAppendedId(coll, c.getLong(0))
                     val name = c.getString(1) ?: continue
                     val size = c.getLong(2)
                     if (size <= 0) continue
                     val mime = c.getString(3) ?: "application/octet-stream"
-                    val dur = if (hasDur) c.getLong(4) else 0
-                    out += Entity(uri.toString(), name, size, mime, uri, null, dur, listOf(Picked(uri, name, size, mime)))
+                    val date = c.getLong(4) * 1000
+                    val folder = folderOf(c.getString(5).orEmpty(), rel)
+                    val dur = if (hasDur) c.getLong(6) else 0
+                    out += Entity(uri.toString(), name, size, mime, uri, null, dur, listOf(Picked(uri, name, size, mime)), folder, date)
                 }
             }
         }
         out
+    }
+
+    /** Was 3000, which hid older photos and videos entirely on a full phone. */
+    private const val MAX_MEDIA = 30_000
+
+    /** "DCIM/Camera/" or "/storage/emulated/0/DCIM/Camera/a.mp4" -> "DCIM/Camera". */
+    private fun folderOf(raw: String, relative: Boolean): String {
+        if (relative) return raw.trim('/')
+        val dir = raw.substringBeforeLast('/', "")
+        // Drop the volume root: /storage/emulated/0/… or /storage/1234-ABCD/…
+        val m = Regex("^/storage/(?:emulated/\\d+|[^/]+)/?").find(dir)
+        return (if (m != null) dir.substring(m.range.last + 1) else dir).trim('/')
     }
 
     /** Files chosen with the system picker. */

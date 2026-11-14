@@ -53,6 +53,11 @@ fun ChooseScreen(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { locOk = hasLoc() }
 
+    // Bluetooth beacons are the quickest way to spot a receiver: say so when Bluetooth is off.
+    val btThere = remember { com.hypershare.p2p.Ble.supported(ctx) }
+    var btOn by remember { mutableStateOf(com.hypershare.p2p.Ble.on(ctx)) }
+    LaunchedEffect(Unit) { while (true) { btOn = com.hypershare.p2p.Ble.on(ctx); kotlinx.coroutines.delay(2_000) } }
+
     Column(Modifier.fillMaxSize().systemBarsPadding()) {
         Column(Modifier.padding(horizontal = 20.dp)) {
             TopRow(if (bench) "Test link speed" else "Send to", onBack)
@@ -83,6 +88,12 @@ fun ChooseScreen(
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     )
+                    if (btThere && !btOn) {
+                        Spacer(Modifier.height(8.dp))
+                        FilledTonalButton({
+                            runCatching { ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) }
+                        }, Modifier.align(Alignment.CenterHorizontally)) { Text("Turn on Bluetooth to find phones faster") }
+                    }
                     if (!locOk) {
                         Spacer(Modifier.height(8.dp))
                         TextButton({

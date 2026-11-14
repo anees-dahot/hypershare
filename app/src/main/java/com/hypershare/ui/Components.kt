@@ -101,23 +101,55 @@ private fun iconFor(mime: String, name: String): ImageVector = when {
 
 // ------------------------------------------------------------------ actions
 
+/**
+ * A file:// uri must never leave the process (FileUriExposedException kills the app). History rows
+ * of sent apps hold one (/data/app/…/base.apk): swap it for a FileProvider uri when the file is
+ * ours to serve, else null.
+ */
+private fun exportable(ctx: Context, uri: Uri): Uri? {
+    if (uri.scheme != "file") return uri
+    return runCatching {
+        androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", java.io.File(uri.path!!))
+    }.getOrNull()
+}
+
+/** Installed app whose APK this file:// uri points at, if any: "open" then means launch the app. */
+private fun appIntentFor(ctx: Context, uri: Uri): Intent? {
+    if (uri.scheme != "file") return null
+    val path = uri.path ?: return null
+    val pm = ctx.packageManager
+    val pkg = runCatching { pm.getPackageArchiveInfo(path, 0)?.packageName }.getOrNull() ?: return null
+    return pm.getLaunchIntentForPackage(pkg)
+}
+
 fun openFile(ctx: Context, uri: Uri, mime: String) = launch(ctx) {
-    Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    val out = exportable(ctx, uri)
+    if (out != null) Intent(Intent.ACTION_VIEW).setDataAndType(out, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    else appIntentFor(ctx, uri)
 }
 
 fun shareFile(ctx: Context, uri: Uri, mime: String) = launch(ctx) {
-    Intent.createChooser(
-        Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-        null,
-    )
+    exportable(ctx, uri)?.let { out ->
+        Intent.createChooser(
+            Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, out)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            null,
+        )
+    }
 }
 
-private fun launch(ctx: Context, intent: () -> Intent) {
-    try { ctx.startActivity(intent()) } catch (e: ActivityNotFoundException) {
+private fun launch(ctx: Context, intent: () -> Intent?) {
+    try {
+        val i = intent()
+        if (i == null) Toast.makeText(ctx, "This file can't be opened from here", Toast.LENGTH_SHORT).show()
+        else ctx.startActivity(i)
+    } catch (e: ActivityNotFoundException) {
         Toast.makeText(ctx, "No app can open this file", Toast.LENGTH_SHORT).show()
     } catch (e: SecurityException) {
         Toast.makeText(ctx, "File is no longer available", Toast.LENGTH_SHORT).show()
+    } catch (e: RuntimeException) {
+        // FileUriExposedException and friends: a bad uri must never take the app down.
+        Toast.makeText(ctx, "This file can't be opened from here", Toast.LENGTH_SHORT).show()
     }
 }
 

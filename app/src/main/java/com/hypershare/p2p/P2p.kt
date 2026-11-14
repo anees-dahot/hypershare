@@ -323,7 +323,8 @@ class P2p(private val ctx: Context) : Closeable {
 data class NearbyPeer(val key: String, val name: String, val invite: String, val freq: Int, val seen: Long)
 
 /**
- * Sender: finds receivers two ways at once:
+ * Sender: finds receivers three ways at once:
+ * - a Bluetooth LE beacon ([Ble]): own radio, no location on Android 12+, the dependable one,
  * - Wi-Fi Direct service discovery (works on Android 13+ without location),
  * - the group's Wi-Fi name in normal Wi-Fi scan results ("DIRECT-hsCODE-Name"): group owners beacon
  *   all the time, so this works even when the receiver's chip stopped answering discovery.
@@ -346,42 +347,67 @@ class Nearby(ctx: Context) {
     /** Scans until the calling coroutine is cancelled. */
     suspend fun run() {
         coroutineScope {
-            launch { scanLoop() }
-            serviceLoop()
+            launch { runCatching { Ble.scan(app, ::beacon) } }
+            launch { while (true) { ingest(); prune(); delay(2_000) } }
+            radioLoop()
         }
     }
 
-    private suspend fun serviceLoop() {
-        val mgr = mgr ?: return
-        val ch = mgr.initialize(app, Looper.getMainLooper(), null) ?: return
+    /** A receiver's Bluetooth beacon: its group code and channel, enough to join. */
+    private fun beacon(f: Ble.Found) {
+        val now = System.currentTimeMillis()
+        val old = peers.value.firstOrNull { it.key == f.code }
+        // Beacons arrive several times a second: refresh the entry, don't redraw the list each time.
+        if (old != null && now - old.seen < 2_000 && (f.freq <= 0 || old.freq == f.freq)) return
+        val freq = if (f.freq > 0) f.freq else old?.freq ?: 0
+        // Service discovery carries the untruncated name: keep it if we have it.
+        val name = old?.name?.takeIf { !it.startsWith("Phone ") && it.length >= f.name.length } ?: f.name.ifBlank { "Phone ${f.code}" }
+        put(NearbyPeer(f.code, name, Invite.fromCode(f.code, freq, name).encode(), freq, now))
+    }
+
+    /**
+     * The two Wi-Fi searches share one radio, so they take turns. A normal Wi-Fi scan asked for
+     * while Wi-Fi Direct discovery is running is refused or comes back empty on many chips
+     * (MediaTek above all), which left the list blank: pause discovery for the scan.
+     */
+    @Suppress("DEPRECATION")
+    private suspend fun radioLoop() {
+        val mgr = mgr
+        val ch = mgr?.initialize(app, Looper.getMainLooper(), null)
         try {
-            discoverServices(mgr, ch)
+            var lastScan = 0L
+            val req = WifiP2pDnsSdServiceRequest.newInstance(SERVICE_TYPE)
+            if (mgr != null && ch != null) mgr.setDnsSdResponseListeners(ch, { _, _, _ -> }, { _, txt, dev ->
+                val raw = txt["i"] ?: return@setDnsSdResponseListeners
+                val inv = runCatching { Invite.decode(raw) }.getOrNull() ?: return@setDnsSdResponseListeners
+                val key = codeOf(inv.ssid) ?: dev.deviceAddress
+                put(NearbyPeer(key, inv.name.ifBlank { dev.deviceName ?: "Phone" }, raw, inv.freq, System.currentTimeMillis()))
+            })
+            while (true) {
+                // Android allows 4 scans per 2 minutes per app; results from other apps' scans come free.
+                if (System.currentTimeMillis() - lastScan > 30_000) {
+                    if (mgr != null && ch != null) runCatching { p2pAct { mgr.stopPeerDiscovery(ch, it) } }
+                    runCatching { wm?.startScan() }
+                    lastScan = System.currentTimeMillis()
+                    delay(4_000)
+                }
+                if (mgr == null || ch == null) { delay(4_000); continue }
+                // Re-adding the request each round: many OEM builds answer only the first
+                // discoverServices() after a request was added, then go quiet.
+                runCatching { p2pAct { mgr.clearServiceRequests(ch, it) } }
+                runCatching { p2pAct { mgr.addServiceRequest(ch, req, it) } }
+                // discoverServices() runs its own peer scan; calling discoverPeers() first just makes it BUSY.
+                val started = runCatching { p2pAct { mgr.discoverServices(ch, it) } }.isSuccess
+                if (!started) runCatching { p2pAct { mgr.discoverPeers(ch, it) } }
+                delay(8_000)
+            }
         } finally {
             // Don't stopPeerDiscovery here: this runs as the screen closes, which can be right as a
             // join starts, and would abort Android's own scan for the receiver. join() stops it safely.
-            runCatching { mgr.clearServiceRequests(ch, null) }
-            if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
-        }
-    }
-
-    private suspend fun discoverServices(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
-        mgr.setDnsSdResponseListeners(ch, { _, _, _ -> }, { _, txt, dev ->
-            val raw = txt["i"] ?: return@setDnsSdResponseListeners
-            val inv = runCatching { Invite.decode(raw) }.getOrNull() ?: return@setDnsSdResponseListeners
-            val key = codeOf(inv.ssid) ?: dev.deviceAddress
-            put(NearbyPeer(key, inv.name.ifBlank { dev.deviceName ?: "Phone" }, raw, inv.freq, System.currentTimeMillis()))
-        })
-        val req = WifiP2pDnsSdServiceRequest.newInstance(SERVICE_TYPE)
-        while (true) {
-            // Re-adding the request each round: many OEM builds answer only the first
-            // discoverServices() after a request was added, then go quiet.
-            runCatching { p2pAct { mgr.clearServiceRequests(ch, it) } }
-            runCatching { p2pAct { mgr.addServiceRequest(ch, req, it) } }
-            // discoverServices() runs its own peer scan; calling discoverPeers() first just makes it BUSY.
-            val started = runCatching { p2pAct { mgr.discoverServices(ch, it) } }.isSuccess
-            if (!started) runCatching { p2pAct { mgr.discoverPeers(ch, it) } }
-            delay(8_000)
-            prune()
+            if (mgr != null && ch != null) {
+                runCatching { mgr.clearServiceRequests(ch, null) }
+                if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
+            }
         }
     }
 
@@ -403,18 +429,6 @@ class Nearby(ctx: Context) {
             // Prefer the service-discovery entry if we have one: it carries the receiver's name.
             val old = peers.value.firstOrNull { it.key == code }
             put(NearbyPeer(code, old?.name ?: "Phone $code", old?.invite ?: Invite.fromCode(code, r.frequency).encode(), r.frequency, System.currentTimeMillis()))
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private suspend fun scanLoop() {
-        var lastScan = 0L
-        while (true) {
-            val now = System.currentTimeMillis()
-            // Android allows 4 scans per 2 minutes per app; results from other apps' scans come free.
-            if (now - lastScan > 30_000) { runCatching { wm?.startScan() }; lastScan = now }
-            ingest()
-            delay(3_000)
         }
     }
 }

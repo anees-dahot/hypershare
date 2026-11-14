@@ -35,7 +35,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.FileOpen
@@ -179,9 +186,9 @@ fun PickScreen(
         HorizontalPager(pager, Modifier.weight(1f), beyondViewportPageCount = 1) { page ->
             when (page) {
                 0 -> AppsTab(apps, selected, ::toggle)
-                1 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(photos, selected) { MediaGrid(it, selected, 3, ::toggle) }
-                2 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(videos, selected) { MediaGrid(it, selected, 3, ::toggle) }
-                3 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else Tools(music, selected) { MusicList(it, selected, ::toggle) }
+                1 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else MediaTab(MediaKind.Photos, photos, selected, pager.currentPage == 1, ::toggle)
+                2 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else MediaTab(MediaKind.Videos, videos, selected, pager.currentPage == 2, ::toggle)
+                3 -> if (!granted) NeedAccess { permLauncher.launch(mediaPerms()) } else MediaTab(MediaKind.Music, music, selected, pager.currentPage == 3, ::toggle)
                 else -> FilesTab(docs, selected, ::toggle, onFiles = { filePicker.launch(arrayOf("*/*")) }, onFolder = { folderPicker.launch(null) }, onText = { writing = true }, onPaste = ::paste)
             }
         }
@@ -273,38 +280,219 @@ private fun CheckMark(on: Boolean, onDark: Boolean) {
     ) { if (on) Icon(Icons.Rounded.Check, null, Modifier.size(15.dp), tint = c.onPrimary) }
 }
 
-private enum class Sort(val label: String) { Newest("Newest"), Oldest("Oldest"), Largest("Largest"), Name("Name") }
+private enum class Sort(val label: String) { Newest("Newest"), Oldest("Oldest"), Largest("Largest"), Longest("Longest"), Name("Name A–Z") }
 
-/** Count, sort menu and Select all above a media tab. */
+private fun List<Entity>.ordered(sort: Sort) = when (sort) {
+    Sort.Newest -> this // the query already returns newest first
+    Sort.Oldest -> asReversed()
+    Sort.Largest -> sortedByDescending { it.size }
+    Sort.Longest -> sortedByDescending { it.durationMs }
+    Sort.Name -> sortedBy { it.label.lowercase() }
+}
+
+/** A storage folder holding media of one kind, as in a video player's folder list. */
+private class Folder(val path: String, val name: String, val items: List<Entity>, val size: Long)
+
+/** "1 video", "24 videos". */
+private fun counted(n: Int, plural: String) = "$n ${if (n == 1) plural.dropLast(1) else plural}"
+
+private fun folderName(path: String) = path.substringAfterLast('/').ifBlank { "Internal storage" }
+
+private fun foldersOf(list: List<Entity>): List<Folder> =
+    list.groupBy { it.folder }
+        .map { (path, items) -> Folder(path, folderName(path), items, items.sumOf { it.size }) }
+        .sortedBy { it.name.lowercase() }
+
+/**
+ * One media tab: search by name, browse everything or folder by folder, sort, select all.
+ * [active] = this is the page on screen (neighbouring pages stay composed and must not grab Back).
+ */
 @Composable
-private fun Tools(list: List<Entity>?, selected: SnapshotStateMap<String, Entity>, content: @Composable (List<Entity>?) -> Unit) {
+private fun MediaTab(kind: MediaKind, list: List<Entity>?, selected: SnapshotStateMap<String, Entity>, active: Boolean, toggle: (Entity) -> Unit) {
+    if (list == null) return Loading()
+    val noun = when (kind) { MediaKind.Photos -> "photos"; MediaKind.Videos -> "videos"; MediaKind.Music -> "songs" }
+    if (list.isEmpty()) return Empty("No $noun found.")
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("picker", 0) }
+    var q by rememberSaveable { mutableStateOf("") }
     var sort by rememberSaveable { mutableStateOf(Sort.Newest) }
+    // Videos open on folders, like a video player; the choice is remembered per tab.
+    var byFolder by remember { mutableStateOf(prefs.getBoolean("folders_$kind", kind == MediaKind.Videos)) }
+    var open by rememberSaveable { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
-    val sorted = remember(list, sort) {
-        list?.let {
-            when (sort) {
-                Sort.Newest -> it
-                Sort.Oldest -> it.reversed()
-                Sort.Largest -> it.sortedByDescending { e -> e.size }
-                Sort.Name -> it.sortedBy { e -> e.label.lowercase() }
+    val folders = remember(list) { foldersOf(list) }
+    val query = q.trim()
+    val folder = if (byFolder && query.isEmpty()) folders.firstOrNull { it.path == open } else null
+    val listing = byFolder && query.isEmpty() && folder == null // the folder list itself is on screen
+    val shown = remember(list, folder, query, sort) {
+        when {
+            // Search always looks everywhere, whatever view is on.
+            query.isNotEmpty() -> list.filter { it.label.contains(query, true) || folderName(it.folder).contains(query, true) }
+            folder != null -> folder.items
+            else -> list
+        }.ordered(sort)
+    }
+    BackHandler(active && (query.isNotEmpty() || folder != null)) { if (query.isNotEmpty()) q = "" else open = null }
+
+    Column {
+        OutlinedTextField(
+            q, { q = it }, Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp), singleLine = true,
+            placeholder = { Text("Search ${counted(list.size, noun)}") },
+            leadingIcon = { Icon(Icons.Outlined.Search, null) },
+            trailingIcon = { if (q.isNotEmpty()) IconButton({ q = "" }) { Icon(Icons.Outlined.Close, "Clear search") } },
+            shape = RoundedCornerShape(14.dp),
+        )
+        Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            when {
+                query.isNotEmpty() -> Text(
+                    "${shown.size} found", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).padding(start = 6.dp),
+                )
+                folder != null -> {
+                    IconButton({ open = null }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "All folders") }
+                    Column(Modifier.weight(1f)) {
+                        Text(folder.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "${counted(folder.items.size, noun)} · ${fmtBytes(folder.size)}",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                        )
+                    }
+                }
+                else -> Row(Modifier.weight(1f).padding(start = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    fun view(f: Boolean) { byFolder = f; open = null; prefs.edit().putBoolean("folders_$kind", f).apply() }
+                    FilterChip(!byFolder, { view(false) }, { Text("All") })
+                    FilterChip(byFolder, { view(true) }, { Text("Folders (${folders.size})") })
+                }
+            }
+            if (!listing) {
+                Box {
+                    TextButton({ menu = true }) { Text(sort.label) }
+                    DropdownMenu(menu, { menu = false }) {
+                        Sort.entries.filter { it != Sort.Longest || kind != MediaKind.Photos }
+                            .forEach { o -> DropdownMenuItem(text = { Text(o.label) }, onClick = { sort = o; menu = false }) }
+                    }
+                }
+                val allOn = shown.isNotEmpty() && shown.all { selected.containsKey(it.key) }
+                TextButton({ if (allOn) shown.forEach { selected.remove(it.key) } else shown.forEach { selected[it.key] = it } }, enabled = shown.isNotEmpty()) {
+                    Text(if (allOn) "Clear" else "Select all")
+                }
+            }
+        }
+        Box(Modifier.weight(1f)) {
+            when {
+                listing -> FolderList(kind, noun, folders, selected) { open = it.path }
+                shown.isEmpty() -> Empty("Nothing matches \"$query\".")
+                kind == MediaKind.Photos -> MediaGrid(shown, selected, 3, toggle)
+                kind == MediaKind.Videos -> VideoList(shown, selected, showFolder = folder == null, toggle)
+                else -> MusicList(shown, selected, toggle)
             }
         }
     }
-    Column {
-        if (!list.isNullOrEmpty()) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${list.size} items", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-            Box {
-                TextButton({ menu = true }) { Text(sort.label) }
-                DropdownMenu(menu, { menu = false }) {
-                    Sort.entries.forEach { o -> DropdownMenuItem(text = { Text(o.label) }, onClick = { sort = o; menu = false }) }
+}
+
+/** Thumbnail from the shared cache, decoded off the main thread; null until ready (or undecodable). */
+@Composable
+private fun rememberThumb(e: Entity): Bitmap? {
+    val ctx = LocalContext.current
+    val bmp by produceState(gridThumbs.get(e.key), e.key) {
+        if (value != null) return@produceState
+        value = withContext(Dispatchers.IO) {
+            e.thumb?.let { thumbOf(ctx, it, e.mime, 256) }
+        }?.also { gridThumbs.put(e.key, it) }
+    }
+    return bmp
+}
+
+/** Folders with a cover, a count, and a check that takes the whole folder in one tap. */
+@Composable
+private fun FolderList(kind: MediaKind, noun: String, folders: List<Folder>, selected: SnapshotStateMap<String, Entity>, onOpen: (Folder) -> Unit) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+        items(folders, key = { it.path }) { f ->
+            val picked = f.items.count { selected.containsKey(it.key) }
+            val all = picked == f.items.size
+            Row(
+                Modifier.fillMaxWidth().clickable { onOpen(f) }.padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.size(60.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.Folder, null, tint = MaterialTheme.colorScheme.primary)
+                    if (kind != MediaKind.Music) rememberThumb(f.items.first())?.let {
+                        Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    }
                 }
-            }
-            val allOn = list.all { selected.containsKey(it.key) }
-            TextButton({ if (allOn) list.forEach { selected.remove(it.key) } else list.forEach { selected[it.key] = it } }) {
-                Text(if (allOn) "Clear" else "Select all")
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(f.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${counted(f.items.size, noun)} · ${fmtBytes(f.size)}",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                    )
+                    if (picked > 0) Text("$picked selected", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    // Two folders can share a name (WhatsApp Video in two places): show where it is.
+                    else if (f.path.contains('/')) Text(
+                        f.path.substringBeforeLast('/'), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable {
+                        if (all) f.items.forEach { selected.remove(it.key) } else f.items.forEach { selected[it.key] = it }
+                    },
+                    contentAlignment = Alignment.Center,
+                ) { CheckMark(all, false) }
             }
         }
-        Box(Modifier.weight(1f)) { content(sorted) }
+    }
+}
+
+/** Videos as rows: you pick a video by its name, not by a tiny square of its first frame. */
+@Composable
+private fun VideoList(list: List<Entity>, selected: Map<String, Entity>, showFolder: Boolean, toggle: (Entity) -> Unit) {
+    val ctx = LocalContext.current
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+        items(list, key = { it.key }) { e ->
+            val on = selected.containsKey(e.key)
+            val bg by animateFloatAsState(if (on) 0.5f else 0f, label = "bg")
+            Row(
+                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = bg))
+                    .clickable { toggle(e) }.padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.width(116.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.Movie, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                    rememberThumb(e)?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+                    if (e.durationMs > 0) Text(
+                        fmtClock(e.durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)
+                            .clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.6f))
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(e.label, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        listOfNotNull(
+                            fmtBytes(e.size), if (showFolder) folderName(e.folder) else null, if (e.date > 0) fmtAgo(e.date) else null,
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton({ e.thumb?.let { openFile(ctx, it, e.mime) } }) {
+                    Icon(Icons.Outlined.PlayArrow, "Play to check", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                CheckMark(on, false)
+                Spacer(Modifier.width(16.dp))
+            }
+        }
     }
 }
 
@@ -354,10 +542,10 @@ private val gridThumbs = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
     override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
 }
 
+/** Tap selects; press and hold opens the photo or video to check it first. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MediaGrid(list: List<Entity>?, selected: Map<String, Entity>, cols: Int, toggle: (Entity) -> Unit) {
-    if (list == null) return Loading()
-    if (list.isEmpty()) return Empty("Nothing here yet.")
+private fun MediaGrid(list: List<Entity>, selected: Map<String, Entity>, cols: Int, toggle: (Entity) -> Unit) {
     val ctx = LocalContext.current
     LazyVerticalGrid(
         GridCells.Fixed(cols), Modifier.fillMaxSize(), contentPadding = PaddingValues(2.dp),
@@ -366,16 +554,11 @@ private fun MediaGrid(list: List<Entity>?, selected: Map<String, Entity>, cols: 
         items(list, key = { it.key }) { e ->
             val on = selected.containsKey(e.key)
             val inset by animateDpAsState(if (on) 10.dp else 0.dp, spring(stiffness = 700f), label = "inset")
-            val bmp by produceState(gridThumbs.get(e.key), e.key) {
-                if (value != null) return@produceState
-                value = withContext(Dispatchers.IO) {
-                    e.thumb?.let { thumbOf(ctx, it, e.mime, 256) }
-                }?.also { gridThumbs.put(e.key, it) }
-            }
+            val bmp = rememberThumb(e)
             Box(
                 Modifier.aspectRatio(1f)
                     .background(if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
-                    .clickable { toggle(e) },
+                    .combinedClickable(onLongClick = { e.thumb?.let { openFile(ctx, it, e.mime) } }) { toggle(e) },
             ) {
                 Box(Modifier.fillMaxSize().padding(inset).clip(RoundedCornerShape(if (on) 8.dp else 0.dp)), contentAlignment = Alignment.Center) {
                     // Shown until (or instead of, if the phone can't decode it) the thumbnail.
@@ -398,9 +581,7 @@ private fun MediaGrid(list: List<Entity>?, selected: Map<String, Entity>, cols: 
 }
 
 @Composable
-private fun MusicList(list: List<Entity>?, selected: Map<String, Entity>, toggle: (Entity) -> Unit) {
-    if (list == null) return Loading()
-    if (list.isEmpty()) return Empty("No music found.")
+private fun MusicList(list: List<Entity>, selected: Map<String, Entity>, toggle: (Entity) -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
         items(list, key = { it.key }) { e ->
             val on = selected.containsKey(e.key)

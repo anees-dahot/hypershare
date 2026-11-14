@@ -32,8 +32,11 @@ import com.hypershare.data.Prefs
 
 private data class Need(val icon: ImageVector, val title: String, val why: String, val perms: Array<String>)
 
-fun wifiPerms(): Array<String> = if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
-else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+fun wifiPerms(): Array<String> = (
+    if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+    else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+    // Android 12+: Bluetooth beacon for the Nearby list. Same "Nearby devices" prompt as Wi-Fi on 13+.
+) + com.hypershare.p2p.Ble.perms()
 
 fun mediaPerms(): Array<String> = when {
     Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO)
