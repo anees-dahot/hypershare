@@ -68,15 +68,12 @@ fun WelcomeScreen(onDone: () -> Unit) {
         Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
     ) {
         Spacer(Modifier.height(32.dp))
-        Box(
-            Modifier.size(72.dp).clip(RoundedCornerShape(22.dp)).background(BrandGradient),
-            contentAlignment = Alignment.Center,
-        ) { Text("H", style = MaterialTheme.typography.headlineLarge, color = androidx.compose.ui.graphics.Color.White) }
-        Spacer(Modifier.height(20.dp))
-        Text("Welcome to HyperShare", style = MaterialTheme.typography.headlineSmall)
+        LogoMark(64.dp)
+        Spacer(Modifier.height(24.dp))
+        Text("Phone to phone.\nNo internet.", style = MaterialTheme.typography.displaySmall)
         Spacer(Modifier.height(6.dp))
         Text(
-            "Send files phone to phone over a direct Wi-Fi link. No internet, no account, nothing uploaded.",
+            "Files go straight over a direct Wi-Fi link. No account, no cloud, nothing uploaded.",
             style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
@@ -127,7 +124,7 @@ fun WelcomeScreen(onDone: () -> Unit) {
 
         Spacer(Modifier.height(24.dp))
         Button(
-            { Prefs.setDeviceName(ctx, name); Prefs.setOnboarded(ctx); onDone() },
+            { Prefs.setDeviceName(ctx, name.trim().ifEmpty { Prefs.deviceName(ctx) }); Prefs.setOnboarded(ctx); onDone() },
             Modifier.fillMaxWidth().height(54.dp),
         ) { Text("Get started", style = MaterialTheme.typography.titleMedium) }
         Spacer(Modifier.height(20.dp))

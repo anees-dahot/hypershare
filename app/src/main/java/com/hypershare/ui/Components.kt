@@ -192,9 +192,9 @@ fun FileThumb(uri: Uri?, mime: String, name: String, size: Dp = 48.dp) {
             thumbOf(ctx, uri, mime, 192)
         }?.also { thumbCache.put(key, it) }
     }
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(size * 0.28f)
     Box(
-        Modifier.size(size).clip(shape).background(MaterialTheme.colorScheme.primaryContainer),
+        Modifier.size(size).clip(shape).background(MaterialTheme.colorScheme.surfaceContainerHigh),
         contentAlignment = Alignment.Center,
     ) {
         AnimatedContent(bmp, transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(120)) }, label = "thumb") { b ->
@@ -202,10 +202,10 @@ fun FileThumb(uri: Uri?, mime: String, name: String, size: Dp = 48.dp) {
                 Image(b.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(iconFor(mime, name), null, Modifier.size(size * 0.42f), tint = MaterialTheme.colorScheme.primary)
+                    Icon(iconFor(mime, name), null, Modifier.size(size * 0.42f), tint = MaterialTheme.colorScheme.onSurface)
                     if (size >= 44.dp) Text(
-                        extOf(name, mime), fontSize = 9.sp, letterSpacing = 0.4.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                        extOf(name, mime), style = Mono, fontSize = 8.sp, letterSpacing = 0.6.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -219,9 +219,8 @@ fun FileThumb(uri: Uri?, mime: String, name: String, size: Dp = 48.dp) {
 fun Panel(modifier: Modifier = Modifier, padding: Dp = 16.dp, content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(22.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) { Column(Modifier.padding(padding), content = content) }
 }
 
@@ -299,12 +298,16 @@ fun FileRow(
             .then(if (dim) Modifier.alpha(0.5f) else Modifier),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ItemThumb(uri, mime, thumbName, pkg)
+        ItemThumb(uri, mime, thumbName, pkg, 44.dp)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
+            // Full name, wrapped: two files often differ only at the end (IMG_2024…_1 vs _2).
+            Text(
+                name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Medium),
+                maxLines = 3, overflow = TextOverflow.Ellipsis,
+            )
             Spacer(Modifier.height(2.dp))
-            Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (progress != null) {
                 Spacer(Modifier.height(6.dp))
                 val p by animateFloatAsState(progress, tween(250), label = "fp")
@@ -383,8 +386,8 @@ fun SpeedChart(samples: List<Float>, window: Int, modifier: Modifier = Modifier)
 fun SectionLabel(text: String, modifier: Modifier = Modifier, trailing: @Composable (() -> Unit)? = null) {
     Row(modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            text.uppercase(Locale.US), style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 0.8.sp, modifier = Modifier.weight(1f),
+            text.uppercase(Locale.US), style = Mono.copy(fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium),
+            color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 1.4.sp, modifier = Modifier.weight(1f),
         )
         trailing?.invoke()
     }
@@ -416,12 +419,12 @@ fun primaryAction(ctx: Context, uri: Uri, mime: String, name: String, install: (
 @Composable
 fun Avatar(name: String, size: Dp = 44.dp) {
     Box(
-        Modifier.size(size).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.primaryContainer),
+        Modifier.size(size).clip(RoundedCornerShape(50)).background(Volt),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             name.trim().take(1).uppercase().ifEmpty { "?" },
-            style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.titleLarge, color = Ink,
         )
     }
 }
@@ -431,9 +434,9 @@ fun Avatar(name: String, size: Dp = 44.dp) {
 fun EmptyState(icon: ImageVector, title: String, body: String? = null, modifier: Modifier = Modifier, action: @Composable (() -> Unit)? = null) {
     Column(modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+            Modifier.size(64.dp).clip(RoundedCornerShape(22.dp)).background(Volt),
             contentAlignment = Alignment.Center,
-        ) { Icon(icon, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary) }
+        ) { Icon(icon, null, Modifier.size(28.dp), tint = Ink) }
         Spacer(Modifier.height(16.dp))
         Text(title, style = MaterialTheme.typography.titleMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         if (body != null) {

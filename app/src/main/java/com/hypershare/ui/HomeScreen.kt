@@ -24,8 +24,10 @@ import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Speed
-import androidx.compose.material.icons.rounded.ArrowDownward
-import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.ArrowOutward
+import androidx.compose.material.icons.rounded.SouthWest
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -59,21 +61,22 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         item {
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(start = 4.dp, top = 8.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                LogoMark(34.dp)
+                Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("HyperShare", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
-                    Spacer(Modifier.height(2.dp))
+                    Text("HyperShare", style = MaterialTheme.typography.titleLarge)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.tertiary))
+                        Box(Modifier.size(6.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.tertiary))
                         Spacer(Modifier.width(6.dp))
                         Text(
                             "Visible as $name",
-                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -84,28 +87,27 @@ fun HomeScreen(
         }
 
         item {
-            AnimatedVisibility(update.available != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            AnimatedVisibility(update.available != null, Modifier.padding(bottom = 8.dp), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 UpdateBanner(update) { scope.launch { Updater.install(ctx) } }
             }
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ActionTile(Icons.Rounded.ArrowUpward, "Send", "Apps, photos, files", true, Modifier.weight(1f), onSend)
-                ActionTile(Icons.Rounded.ArrowDownward, "Receive", "Show your code", false, Modifier.weight(1f), onReceive)
+            Row(Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ActionTile(Icons.Rounded.ArrowOutward, "Send", "Apps, photos,\nvideos, files", true, Modifier.weight(1f), onSend)
+                ActionTile(Icons.Rounded.SouthWest, "Receive", "Show your QR\nor code", false, Modifier.weight(1f), onReceive)
             }
         }
 
         item {
-            Panel(Modifier.fillMaxWidth(), padding = 0.dp) {
-                LinkRow(Icons.Outlined.Inventory2, "Received files", "Search, open, install, share", onInbox)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                LinkRow(Icons.Outlined.Speed, "Test link speed", "2 GB of test data, nothing saved", onBench)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                LinkTile(Icons.Outlined.Inventory2, "Received", "Open, install, share", Modifier.weight(1f), onInbox)
+                LinkTile(Icons.Outlined.Speed, "Speed test", "No files saved", Modifier.weight(1f), onBench)
             }
         }
 
         item {
-            SectionLabel("Recent", Modifier.padding(top = 8.dp)) {
+            SectionLabel("Recent", Modifier.padding(top = 14.dp, bottom = 6.dp)) {
                 if (history.isNotEmpty()) TextButton(onInbox, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("See all") }
             }
         }
@@ -116,81 +118,93 @@ fun HomeScreen(
                 }
             }
         } else {
-            item {
-                val recent = history.take(8)
-                Panel(Modifier.fillMaxWidth(), padding = 0.dp) {
-                    Spacer(Modifier.height(6.dp))
-                    recent.forEachIndexed { i, h ->
-                        val uri = h.uri?.let(Uri::parse)
-                        val sent = h.role == "Send"
-                        val text = h.text
-                        if (text != null) FileRow(
-                            name = textTitle(text), mime = h.mime, uri = null,
-                            meta = "${if (sent) "Sent" else "Received"} · ${if (linkIn(text) != null) "Link" else "Text"} · ${fmtAgo(h.time)}",
-                            progress = null, done = false,
-                            actions = listOf(RowAction(Icons.Outlined.ContentCopy, "Copy") { copyText(ctx, text) }),
-                            thumbName = h.name,
-                            onClick = { viewing = text },
-                        ) else FileRow(
-                            name = h.name, mime = h.mime, uri = uri,
-                            meta = "${if (sent) "Sent" else "Received"} · ${fmtBytes(h.size)} · ${fmtAgo(h.time)}",
-                            progress = null, done = false,
-                            actions = if (uri != null) listOf(RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, h.mime) }) else emptyList(),
-                            onClick = uri?.let { { openFile(ctx, it, h.mime) } },
-                        )
-                        if (i < recent.lastIndex) HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    }
-                    Spacer(Modifier.height(6.dp))
+            val recent = history.take(8)
+            // One lazy item per row (keyed) so rows animate and recycle; corners rounded on the ends only.
+            itemsIndexed(recent, key = { i, h -> "${h.time}:${h.name}:$i" }) { i, h ->
+                val shape = RoundedCornerShape(
+                    topStart = if (i == 0) 22.dp else 4.dp, topEnd = if (i == 0) 22.dp else 4.dp,
+                    bottomStart = if (i == recent.lastIndex) 22.dp else 4.dp, bottomEnd = if (i == recent.lastIndex) 22.dp else 4.dp,
+                )
+                Surface(Modifier.fillMaxWidth().animateItem(), shape = shape, color = MaterialTheme.colorScheme.surface) {
+                    val uri = h.uri?.let(Uri::parse)
+                    val sent = h.role == "Send"
+                    val text = h.text
+                    val dir = if (sent) "Sent" else "Received"
+                    if (text != null) FileRow(
+                        name = textTitle(text), mime = h.mime, uri = null,
+                        meta = "$dir · ${if (linkIn(text) != null) "Link" else "Text"} · ${fmtAgo(h.time)}",
+                        progress = null, done = false,
+                        actions = listOf(RowAction(Icons.Outlined.ContentCopy, "Copy") { copyText(ctx, text) }),
+                        thumbName = h.name,
+                        onClick = { viewing = text },
+                    ) else FileRow(
+                        name = h.name, mime = h.mime, uri = uri,
+                        meta = "$dir · ${fmtBytes(h.size)} · ${fmtAgo(h.time)}",
+                        progress = null, done = false,
+                        actions = if (uri != null) listOf(RowAction(Icons.Outlined.Share, "Share") { shareFile(ctx, uri, h.mime) }) else emptyList(),
+                        onClick = uri?.let { { openFile(ctx, it, h.mime) } },
+                    )
                 }
             }
         }
     }
 }
 
+/** App mark: volt square, ink bolt-arrow. */
 @Composable
-private fun LinkRow(icon: ImageVector, title: String, sub: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, color = Color.Transparent) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+fun LogoMark(size: androidx.compose.ui.unit.Dp) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(size * 0.3f)).background(Volt),
+        contentAlignment = Alignment.Center,
+    ) { Icon(Icons.Rounded.ArrowOutward, null, Modifier.size(size * 0.62f), tint = Ink) }
+}
+
+@Composable
+private fun LinkTile(icon: ImageVector, title: String, sub: String, modifier: Modifier, onClick: () -> Unit) {
+    val src = remember { MutableInteractionSource() }
+    Surface(
+        onClick = onClick, interactionSource = src, modifier = modifier.pressable(src),
+        shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface,
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+                Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh),
                 contentAlignment = Alignment.Center,
-            ) { Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) }
-            Spacer(Modifier.width(14.dp))
+            ) { Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurface) }
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
             }
-            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
+/** Big home tile. Send = volt on ink text; Receive = inverse (ink in light, paper in dark). */
 @Composable
 private fun ActionTile(icon: ImageVector, title: String, sub: String, filled: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val c = MaterialTheme.colorScheme
     val src = remember { MutableInteractionSource() }
-    val fg = if (filled) Color.White else c.onSurface
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    // Receive: solid ink in light mode; raised grey in dark so only Send glows.
+    val bg = if (filled) Volt else if (dark) c.surfaceContainerHighest else Ink
+    val fg = if (filled) Ink else Color.White
     Surface(
         onClick = onClick, interactionSource = src,
         modifier = modifier.pressable(src),
         shape = MaterialTheme.shapes.extraLarge,
-        color = if (filled) Color.Transparent else c.surface,
-        border = if (filled) null else BorderStroke(1.dp, c.outlineVariant),
-        shadowElevation = if (filled) 6.dp else 0.dp,
+        color = bg,
     ) {
-        Column(
-            Modifier.fillMaxWidth().then(if (filled) Modifier.background(BrandGradient) else Modifier).padding(20.dp).heightIn(min = 136.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Box(
-                Modifier.size(48.dp).clip(RoundedCornerShape(15.dp))
-                    .background(if (filled) Color.White.copy(alpha = 0.16f) else c.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) { Icon(icon, null, tint = if (filled) fg else c.primary) }
-            Spacer(Modifier.height(22.dp))
-            Text(title, style = MaterialTheme.typography.titleLarge, color = fg)
-            Spacer(Modifier.height(2.dp))
-            Text(sub, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = if (filled) 0.82f else 0.62f))
+        Column(Modifier.fillMaxWidth().padding(18.dp).heightIn(min = 168.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Text(title, style = MaterialTheme.typography.headlineMedium, color = fg, modifier = Modifier.weight(1f))
+                Box(
+                    Modifier.size(44.dp).clip(RoundedCornerShape(50)).background(if (filled) Ink else Volt),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(icon, null, Modifier.size(22.dp), tint = if (filled) Volt else Ink) }
+            }
+            Spacer(Modifier.weight(1f))
+            Text(sub, style = MaterialTheme.typography.bodyMedium, color = fg.copy(alpha = 0.72f))
         }
     }
 }

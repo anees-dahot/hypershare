@@ -79,7 +79,14 @@ fun TransferScreen(s: UiState, onSendMore: () -> Unit, onRetry: () -> Unit, onCl
     val incoming = all.filter { !it.outgoing }
     val outgoing = all.filter { it.outgoing }
     val title = when (s.phase) {
-        Phase.Done -> when { s.bench -> "Speed test done"; s.connected -> "Connected"; outgoing.isNotEmpty() && incoming.isEmpty() -> "Sent"; else -> "Received" }
+        // Say what happened, even while the link stays up for "Send more".
+        Phase.Done -> when {
+            s.bench -> "Speed test done"
+            all.isEmpty() -> "Connected"
+            incoming.isNotEmpty() && outgoing.isNotEmpty() -> "All done"
+            outgoing.isNotEmpty() -> "All sent"
+            else -> "All received"
+        }
         Phase.Failed -> if (s.error == "Cancelled") "Cancelled" else "Transfer failed"
         Phase.Connecting, Phase.Preparing, Phase.Waiting -> "Connecting"
         else -> when {
@@ -182,8 +189,9 @@ private fun androidx.compose.foundation.lazy.LazyListScope.section(
     if (list.isEmpty()) return
     item(key = "h:$title") {
         val n = list.count { it.status == FStatus.Done }
+        val skipped = list.count { it.status == FStatus.Skipped }
         SectionLabel(title, Modifier.padding(top = 4.dp, bottom = 8.dp)) {
-            Text("$n of ${list.size} done", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$n of ${list.size - skipped} done" + if (skipped > 0) " · $skipped skipped" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
     items(list, key = { it.key }) { r ->
@@ -209,7 +217,7 @@ private fun ItemRow(r: Row, sending: Boolean, live: Boolean, onInstall: (Row) ->
     val ctx = LocalContext.current
     val f = r.first
     val uri = f.uri
-    val pct = if (r.size > 0) r.done.toFloat() / r.size else 1f
+    val pct = if (r.size > 0) r.done.toFloat() / r.size else if (r.status == FStatus.Done) 1f else 0f
     val pending = r.status == FStatus.Queued || r.status == FStatus.Active
     val done = r.status == FStatus.Done
     val isText = f.group == TEXT_GROUP

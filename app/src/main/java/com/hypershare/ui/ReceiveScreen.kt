@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -36,6 +37,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -74,10 +76,14 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
                     s.qr, label = "qr",
                     transitionSpec = { (fadeIn(tween(300)) + scaleIn(tween(300), initialScale = 0.94f)) togetherWith fadeOut(tween(150)) },
                 ) { qr ->
-                    if (qr == null) QrPlaceholder() else {
-                        val bmp = remember(qr) { qrBitmap(qr) }
+                    // Encoding a QR is CPU work: do it off the main thread, show the placeholder meanwhile.
+                    val bmp by produceState<android.graphics.Bitmap?>(null, qr) {
+                        value = qr?.let { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { runCatching { qrBitmap(it) }.getOrNull() } }
+                    }
+                    val b = bmp
+                    if (b == null) QrPlaceholder() else {
                         Image(
-                            bmp.asImageBitmap(), "Pairing code",
+                            b.asImageBitmap(), "Pairing code",
                             // White quiet zone so the code scans in dark mode too.
                             Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color.White).padding(14.dp),
                             filterQuality = FilterQuality.None,
@@ -87,11 +93,14 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
             }
             s.code?.let { c ->
                 Spacer(Modifier.height(10.dp))
-                Text(
-                    "Code  " + c.chunked(3).joinToString(" "),
-                    style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
-                )
+                Column(Modifier.align(Alignment.CenterHorizontally), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("OR TYPE THIS CODE", style = Mono.copy(fontSize = 11.sp), letterSpacing = 1.4.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        c.chunked(3).joinToString(" "),
+                        style = Mono.copy(fontSize = 30.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 4.sp),
+                    )
+                }
             }
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -177,8 +186,11 @@ fun ReceiveScreen(s: UiState, onBack: () -> Unit, onBand: (only24: Boolean) -> U
 @Composable
 fun TopRow(title: String, onBack: () -> Unit, trailing: @Composable (() -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onBack, Modifier.offset(x = (-12).dp)) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") }
-        Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f).offset(x = (-8).dp))
+        FilledTonalIconButton(onBack, colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back")
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
         trailing?.invoke()
     }
 }

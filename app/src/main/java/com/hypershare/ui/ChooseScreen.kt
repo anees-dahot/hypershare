@@ -69,7 +69,7 @@ fun ChooseScreen(
             SectionLabel("Nearby") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     PulseDot(); Spacer(Modifier.width(8.dp))
-                    Text("Searching", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (peers.isEmpty()) "Searching" else "${peers.size} found · searching", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -84,7 +84,7 @@ fun ChooseScreen(
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "On the other phone, open HyperShare and tap Receive. It appears here within a few seconds. " +
-                            "If it doesn't, scan its QR code or type the 6-character code shown under it.",
+                            "If it doesn't, scan its QR code or type the $CODE_LEN-character code shown under it.",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     )
@@ -106,15 +106,14 @@ fun ChooseScreen(
                 AnimatedVisibility(true, enter = fadeIn() + expandVertically()) {
                     Surface(
                         onClick = { onPeer(p) }, modifier = Modifier.fillMaxWidth(),
-                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
                         color = MaterialTheme.colorScheme.surface,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     ) {
                         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Avatar(p.name, 48.dp)
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(p.name, style = MaterialTheme.typography.titleMedium)
+                                Text(p.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                 Text(
                                     "Wi-Fi Direct" + when { p.freq <= 0 -> ""; p.freq < 5000 -> " · 2.4 GHz"; else -> " · 5 GHz" },
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

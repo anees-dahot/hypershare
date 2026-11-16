@@ -66,6 +66,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.hypershare.data.Entity
@@ -351,7 +352,7 @@ private fun MediaTab(kind: MediaKind, list: List<Entity>?, selected: SnapshotSta
                 folder != null -> {
                     IconButton({ open = null }) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "All folders") }
                     Column(Modifier.weight(1f)) {
-                        Text(folder.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(folder.name, style = MaterialTheme.typography.labelLarge, maxLines = 3, overflow = TextOverflow.Ellipsis)
                         Text(
                             "${counted(folder.items.size, noun)} · ${fmtBytes(folder.size)}",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
@@ -415,7 +416,7 @@ private fun FolderList(kind: MediaKind, noun: String, folders: List<Folder>, sel
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
-                    Modifier.size(60.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+                    Modifier.size(60.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Outlined.Folder, null, tint = MaterialTheme.colorScheme.primary)
@@ -425,7 +426,7 @@ private fun FolderList(kind: MediaKind, noun: String, folders: List<Folder>, sel
                 }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(f.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(f.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), maxLines = 4, overflow = TextOverflow.Ellipsis)
                     Text(
                         "${counted(f.items.size, noun)} · ${fmtBytes(f.size)}",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
@@ -476,7 +477,7 @@ private fun VideoList(list: List<Entity>, selected: Map<String, Entity>, showFol
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(e.label, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(e.label, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium), maxLines = 4, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(2.dp))
                     Text(
                         listOfNotNull(
@@ -530,7 +531,7 @@ private fun AppsGrid(apps: List<Entity>?, selected: Map<String, Entity>, toggle:
                     Box(Modifier.align(Alignment.TopEnd).offset(6.dp, (-6).dp)) { if (on) CheckMark(true, false) }
                 }
                 Spacer(Modifier.height(6.dp))
-                Text(e.label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(e.label, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                 Text(fmtBytes(e.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -595,7 +596,7 @@ private fun MusicList(list: List<Entity>, selected: Map<String, Entity>, toggle:
                 ) { Icon(Icons.Outlined.MusicNote, null, tint = MaterialTheme.colorScheme.primary) }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(e.label.substringBeforeLast('.'), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(e.label.substringBeforeLast('.'), style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium), maxLines = 3, overflow = TextOverflow.Ellipsis)
                     Text(metaOf(e), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 CheckMark(on, false)
